@@ -44,6 +44,7 @@ def init_db() -> None:
             risk_score      INTEGER,
             first_seen      TEXT,
             last_seen       TEXT,
+            channel         INTEGER DEFAULT 0,
             UNIQUE(engagement_id, bd_address)
         );
 
@@ -96,8 +97,8 @@ def upsert_target(t: Target) -> None:
             INSERT INTO targets
                 (engagement_id, bd_address, address_type, adv_type, name,
                  manufacturer, company_id, services, tx_power, rssi_avg,
-                 device_class, connectable, risk_score, first_seen, last_seen)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 device_class, connectable, risk_score, first_seen, last_seen, channel)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(engagement_id, bd_address) DO UPDATE SET
                 name            = excluded.name,
                 manufacturer    = excluded.manufacturer,
@@ -107,13 +108,15 @@ def upsert_target(t: Target) -> None:
                 device_class    = excluded.device_class,
                 connectable     = excluded.connectable,
                 risk_score      = excluded.risk_score,
-                last_seen       = excluded.last_seen
+                last_seen       = excluded.last_seen,
+                channel         = excluded.channel
         """, (
             t.engagement_id, t.bd_address, t.address_type, t.adv_type,
             t.name, t.manufacturer, t.company_id,
             json.dumps(t.services), t.tx_power, t.rssi_avg,
             t.device_class, int(t.connectable), t.risk_score,
-            t.first_seen.isoformat(), t.last_seen.isoformat()
+            t.first_seen.isoformat(), t.last_seen.isoformat(),
+            t.channel
         ))
 
 

@@ -26,13 +26,26 @@ def oui_lookup(bd_address: str) -> str | None:
     Extend with a real OUI database file if precision is needed.
     """
     oui_map = {
+        "38:8B:59": "Apple",
+        "A4:C1:38": "Espressif",
         "AC:23:3F": "Nordic Semiconductor",
         "00:1A:7D": "Intel",
         "F8:1A:67": "Texas Instruments",
         "04:A3:16": "Silicon Laboratories",
         "C4:BE:84": "Texas Instruments",
-        "38:8B:59": "Apple",
-        "A4:C1:38": "Espressif",
+        "E8:E0:E6": "Realtek",
+        "8C:2B:AA": "Broadcom",
+        "F0:9F:C2": "Qualcomm",
+        "00:0D:B5": "Philips",
+        "BC:85:56": "Fitbit",
+        "48:65:EE": "Garmin",
+        "30:AE:A4": "Xiaomi",
+        "4C:65:A8": "OnePlus",
+        "AC:BC:32": "Lenovo",
+        "B0:B9:8A": "Parrot",
+        "5A:31:3E": "Amazon",
+        "D8:A0:30": "Sonos",
+        "00:13:10": "Plantronics",
     }
     prefix = bd_address.upper()[:8]
     return oui_map.get(prefix)

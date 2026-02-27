@@ -14,3 +14,5 @@ core/__init__.py
 output/__init__.py
 
 stages/__init__.py
+
+findings.db

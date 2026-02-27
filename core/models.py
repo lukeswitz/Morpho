@@ -23,6 +23,7 @@ class Target:
     raw_adv_records:        list[bytes]         = field(default_factory=list)
     risk_score:             int                 = 0
     engagement_id:          Optional[str]       = None
+    channel:                int                 = 0
 
 
 @dataclass

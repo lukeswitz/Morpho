@@ -30,28 +30,29 @@ def classify_device(t: Target) -> str:
 def compute_risk_score(t: Target) -> int:
     score = 0
 
-    if t.device_class in ("access_control", "medical"):
+    if t.device_class == "access_control":
+        score += 5
+    elif t.device_class == "medical":
+        score += 4
+    elif t.device_class == "industrial":
         score += 3
-    elif t.device_class in ("industrial", "sensor"):
-        score += 2
-    elif t.device_class == "it_gear":
-        score += 1
+    else:
+        score = 1
 
     if t.connectable:
-        score += 2
+        score += 1
+    else:
+        return score
 
-    if t.address_type == "public":
+    if not t.address_type.startswith("random"):
         score += 1
 
-    if t.rssi_avg > -60:
+    if t.rssi_avg > -50:
         score += 1
 
-    if not t.services:
-        score += 1  # no visible service UUIDs = potentially hiding something
-
-    for name_pat in config.HIGH_VALUE_PATTERNS:
-        if re.search(name_pat, (t.name or "").lower()):
-            score += 2
+    for pattern in config.HIGH_VALUE_PATTERNS:
+        if re.search(pattern, (t.name or "").lower()):
+            score += 3
             break
 
     return min(score, 10)

@@ -301,25 +301,39 @@ def _evaluate_findings(conn: Connection, engagement_id: str) -> None:
 
 
 def _print_summary(connections: list[Connection]) -> None:
-    print("\n" + "-" * 72)
-    print(f"  STAGE 2 SUMMARY -- {len(connections)} connections captured")
-    print("-" * 72)
+    from core.db import get_targets
+    
     if not connections:
+        print("\n" + "-" * 80)
+        print(f"  STAGE 2 SUMMARY -- 0 connections captured")
+        print("-" * 80)
         print("  No CONNECT_IND PDUs observed during sniff window.")
-        print("-" * 72)
+        print("-" * 80)
         return
-
+    
+    eng_id = connections[0].engagement_id
+    targets_db = get_targets(eng_id)
+    targets_by_addr = {
+        t["bd_address"]: t["name"]
+        for t in targets_db
+    }
+    
+    print("\n" + "-" * 90)
+    print(f"  STAGE 2 SUMMARY -- {len(connections)} connections captured")
+    print("-" * 90)
     print(
         f"  {'CENTRAL':<20} {'PERIPHERAL':<20} "
-        f"{'AA':>10}  ENC  LEGACY  PLAIN"
+        f"{'AA':>10}  ENC  LEGACY  PLAIN  NAME"
     )
-    print("-" * 72)
+    print("-" * 90)
     for c in connections:
+        periph_name = targets_by_addr.get(c.peripheral_addr) or "—"
         print(
             f"  {c.central_addr:<20} {c.peripheral_addr:<20} "
             f"0x{c.access_address:08X}  "
             f"{'Y' if c.encrypted else 'N':>3}  "
             f"{'Y' if c.legacy_pairing_observed else 'N':>6}  "
-            f"{'Y' if c.plaintext_data_captured else 'N':>5}"
+            f"{'Y' if c.plaintext_data_captured else 'N':>5}  "
+            f"{periph_name}"
         )
-    print("-" * 72 + "\n")
+    print("-" * 90 + "\n")

@@ -87,15 +87,21 @@ def _addr_type_label(pkt, bd_addr: str) -> str:
     }.get(top2, "random")
 
 
-def _raw_ad_bytes(pkt) -> bytes:
-    for layer_cls in _ADV_LAYERS:
-        inner = pkt.getlayer(layer_cls)
-        if inner is not None:
-            raw = bytes(inner.payload)
-            if raw:
-                return raw
-    return b""
+def _extract_channel(pkt) -> int:
+    """Extract channel from packet metadata."""
+    meta = getattr(pkt, "metadata", None)
+    if meta is not None:
+        return getattr(meta, "channel", 0) or 0
+    return 0
 
+
+def _raw_ad_bytes(pkt) -> bytes:
+    """Extract advertising payload from raw packet bytes."""
+    raw = bytes(pkt)
+    if len(raw) < 12:
+        return b""
+    # Skip access address (4) + header (2) + AdvA (6) = 12 bytes
+    return raw[12:]
 
 def _parse_ad_records(raw_bytes: bytes) -> dict:
     result = {
@@ -122,9 +128,8 @@ def _parse_ad_records(raw_bytes: bytes) -> dict:
 
         if ad_type in (AD_COMPLETE_NAME, AD_SHORT_NAME):
             try:
-                result["name"] = payload.decode(
-                    "utf-8", errors="replace"
-                ).strip("\x00")
+                decoded = payload.decode("utf-8", errors="replace").strip("\x00")
+                result["name"] = _sanitize_string(decoded)
             except Exception:
                 pass
 
@@ -222,6 +227,7 @@ def run(dongle: WhadDongle, engagement_id: str) -> list[Target]:
                 ad = _parse_ad_records(raw_ad)
                 addr_type = _addr_type_label(pkt, bd_addr)
                 connectable = pdu in ("ADV_IND", "ADV_DIRECT_IND")
+                channel = _extract_channel(pkt)
 
                 if bd_addr not in targets:
                     t = Target(
@@ -242,6 +248,7 @@ def run(dongle: WhadDongle, engagement_id: str) -> list[Target]:
                         raw_adv_records=[raw_ad] if raw_ad else [],
                         risk_score=0,
                         engagement_id=engagement_id,
+                        channel=channel,
                     )
 
                     if addr_type == "public":
@@ -267,6 +274,9 @@ def run(dongle: WhadDongle, engagement_id: str) -> list[Target]:
                     t.rssi_avg = sum(t.rssi_samples) / len(
                         t.rssi_samples
                     )
+
+                    raw_ad = _raw_ad_bytes(pkt)
+                    ad = _parse_ad_records(raw_ad)
 
                     if ad["name"] and not t.name:
                         t.name = ad["name"]
@@ -303,8 +313,9 @@ def _log_new_target(t: Target) -> None:
     log.info(
         f"[{risk_tag}] {t.bd_address}  "
         f"{t.address_type:<22}  "
-        f"{t.device_class:<14}  "
+        f"{t.adv_type:<14}  "
         f"conn={t.connectable}  "
+        f"ch={t.channel:<2}  "
         f"rssi={t.rssi_samples[-1]:>4} dBm  "
         f"name={t.name or '—'}"
     )
@@ -312,6 +323,14 @@ def _log_new_target(t: Target) -> None:
         log.debug(f"         services: {', '.join(t.services)}")
     if t.manufacturer:
         log.debug(f"         manufacturer: {t.manufacturer}")
+
+
+def _sanitize_string(s: str | None) -> str | None:
+    """Strip null bytes and whitespace from strings."""
+    if not s:
+        return None
+    clean = s.lstrip('\x00').rstrip('\x00').strip()
+    return clean if clean else None
 
 
 def _risk_label(score: int) -> str:
@@ -327,24 +346,53 @@ def _risk_label(score: int) -> str:
 
 
 def _print_summary(targets: list[Target]) -> None:
-    print("\n" + "─" * 72)
+    print("\033[2J\033[H", end="")
+    
+    print("\n" + "─" * 130)
     print(f"  STAGE 1 SUMMARY -- {len(targets)} devices discovered")
-    print("─" * 72)
+    print("─" * 130)
     print(
         f"  {'RISK':<6} {'BD ADDRESS':<20} {'TYPE':<14} "
-        f"{'CONN':<5} {'RSSI':>6}  NAME"
+        f"{'PDU':<16} {'CONN':<5} {'CH':<4} {'RSSI':>6}  NAME                      MANUFACTURER"
     )
-    print("─" * 72)
+    print("─" * 130)
     for t in targets:
         print(
             f"  {_risk_label(t.risk_score):<6} "
             f"{t.bd_address:<20} "
             f"{t.device_class:<14} "
+            f"{t.adv_type:<16} "
             f"{'yes' if t.connectable else 'no':<5} "
+            f"{t.channel:<4} "
             f"{t.rssi_avg:>5.0f}  "
-            f"{t.name or '—'}"
+            f"{(t.name or '—'):<25} "
+            f"{t.manufacturer or '—'}"
         )
-    print("─" * 72)
+    print("─" * 130)
+
+    by_class: dict[str, list[Target]] = {}
+    for t in targets:
+        by_class.setdefault(t.device_class, []).append(t)
+
+    print("\n  Device class breakdown:")
+    for cls, items in sorted(
+        by_class.items(), key=lambda x: -len(x[1])
+    ):
+        connectable_count = sum(1 for t in items if t.connectable)
+        print(
+            f"    {cls:<16} {len(items):>3} total  "
+            f"{connectable_count:>3} connectable"
+        )
+
+    high_risk = [t for t in targets if t.risk_score >= 6]
+    if high_risk:
+        print(f"\n  HIGH/CRITICAL targets ({len(high_risk)}):")
+        for t in high_risk:
+            print(
+                f"    {t.bd_address}  score={t.risk_score}  "
+                f"{t.name or '(unnamed)'}  {t.device_class}"
+            )
+    print()
 
     by_class: dict[str, list[Target]] = {}
     for t in targets:

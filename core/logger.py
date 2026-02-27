@@ -7,7 +7,7 @@ LOG_FMT  = "%(asctime)s [%(levelname)s] %(name)s — %(message)s"
 DATE_FMT = "%H:%M:%S"
 
 
-def get_logger(name: str, level: int = logging.DEBUG) -> logging.Logger:
+def get_logger(name: str, level: int = logging.INFO) -> logging.Logger:
     logger = logging.getLogger(name)
     if logger.handlers:
         return logger

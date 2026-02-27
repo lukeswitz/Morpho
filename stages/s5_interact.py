@@ -100,9 +100,8 @@ def run(
                         if raw_val is not None:
                             gc.value_hex = raw_val.hex()
                             try:
-                                gc.value_text = raw_val.decode(
-                                    "utf-8", errors="replace"
-                                )
+                                decoded = raw_val.decode("utf-8", errors="replace")
+                                gc.value_text = _sanitize_string(decoded)
                             except Exception:
                                 pass
                             gc.requires_auth = False
@@ -110,9 +109,8 @@ def run(
 
                             uuid_int = _uuid_to_int(char_uuid)
                             if uuid_int in INFO_UUIDS:
-                                device_info[
-                                    INFO_UUIDS[uuid_int]
-                                ] = gc.value_text or gc.value_hex
+                                val_display = _sanitize_string(gc.value_text) or gc.value_hex
+                                device_info[INFO_UUIDS[uuid_int]] = val_display
 
                             log.debug(
                                 f"  {char_uuid} h={value_handle} "
