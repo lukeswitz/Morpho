@@ -393,27 +393,3 @@ def _print_summary(targets: list[Target]) -> None:
                 f"{t.name or '(unnamed)'}  {t.device_class}"
             )
     print()
-
-    by_class: dict[str, list[Target]] = {}
-    for t in targets:
-        by_class.setdefault(t.device_class, []).append(t)
-
-    print("\n  Device class breakdown:")
-    for cls, items in sorted(
-        by_class.items(), key=lambda x: -len(x[1])
-    ):
-        connectable_count = sum(1 for t in items if t.connectable)
-        print(
-            f"    {cls:<16} {len(items):>3} total  "
-            f"{connectable_count:>3} connectable"
-        )
-
-    high_risk = [t for t in targets if t.risk_score >= 6]
-    if high_risk:
-        print(f"\n  HIGH/CRITICAL targets ({len(high_risk)}):")
-        for t in high_risk:
-            print(
-                f"    {t.bd_address}  score={t.risk_score}  "
-                f"{t.name or '(unnamed)'}  {t.device_class}"
-            )
-    print()

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from core.dongle import WhadDongle
 from core.db import init_db, upsert_engagement
-from core.logger import get_logger, stage_banner, active_gate
+from core.logger import get_logger, stage_banner, active_gate, select_targets
 import config
 
 log = get_logger("main")
@@ -168,24 +168,38 @@ def main() -> None:
 
         if 4 in stages_requested and (targets or connections):
             stage_banner(4, "Reactive Jamming PoC", passive=False)
-            jam_target = (
-                connections[0]
-                if connections
-                else next(
-                    (t for t in targets if t.connectable), None
-                )
-            )
-            if jam_target:
+            if connections:
+                jam_target = connections[0]
                 if not config.ACTIVE_GATE or active_gate(
                     4,
                     "Reactive jamming will disrupt BLE communications. "
                     "Authorized targets only.",
                 ):
                     from stages import s4_jam
-
                     s4_jam.run(dongle, jam_target, eng_id)
             else:
-                log.info("Stage 4 skipped: no suitable target.")
+                connectable = [t for t in targets if t.connectable]
+                if connectable:
+                    jam_picks = select_targets(
+                        connectable,
+                        prompt="Stage 4 — Pick ONE target to jam",
+                        smart_skip_classes={"it_gear"},
+                    )
+                    if jam_picks:
+                        jam_target = jam_picks[0]
+                        if not config.ACTIVE_GATE or active_gate(
+                            4,
+                            f"Reactive jamming will disrupt BLE communications "
+                            f"for {jam_target.bd_address} "
+                            f"({jam_target.name or jam_target.device_class}). "
+                            "Authorized targets only.",
+                        ):
+                            from stages import s4_jam
+                            s4_jam.run(dongle, jam_target, eng_id)
+                    else:
+                        log.info("Stage 4 skipped by operator.")
+                else:
+                    log.info("Stage 4 skipped: no connectable targets.")
 
         if 5 in stages_requested and targets:
             connectable = [t for t in targets if t.connectable]
@@ -193,15 +207,23 @@ def main() -> None:
                 stage_banner(
                     5, "Direct Interaction / GATT Enumeration", passive=False
                 )
-                if not config.ACTIVE_GATE or active_gate(
-                    5,
-                    f"Will connect to {len(connectable)} device(s) "
-                    "and enumerate GATT profiles.",
-                ):
-                    from stages import s5_interact
-
-                    for t in connectable:
-                        s5_interact.run(dongle, t, eng_id)
+                gatt_picks = select_targets(
+                    connectable,
+                    prompt="Stage 5 — Select targets for GATT enumeration",
+                    default_all=False,
+                    smart_skip_classes={"it_gear"},
+                )
+                if gatt_picks:
+                    if not config.ACTIVE_GATE or active_gate(
+                        5,
+                        f"Will connect to {len(gatt_picks)} device(s) "
+                        "and enumerate GATT profiles.",
+                    ):
+                        from stages import s5_interact
+                        for t in gatt_picks:
+                            s5_interact.run(dongle, t, eng_id)
+                else:
+                    log.info("Stage 5 skipped by operator.")
             else:
                 log.info("Stage 5 skipped: no connectable targets.")
 
@@ -229,13 +251,19 @@ def _emit_summary(eng_id: str) -> None:
     findings = get_findings(eng_id)
 
     with _connect() as conn:
-        total_targets = conn.execute("SELECT COUNT(*) FROM targets").fetchone()[0]
+        unique_devices = conn.execute(
+            "SELECT COUNT(DISTINCT bd_address) FROM targets"
+        ).fetchone()[0]
+        total_sightings = conn.execute("SELECT COUNT(*) FROM targets").fetchone()[0]
         total_engagements = conn.execute("SELECT COUNT(*) FROM engagements").fetchone()[0]
 
     print("\n" + "=" * 60)
     print(f"  RUN COMPLETE — engagement {eng_id}")
     print(f"  Targets this run : {len(targets)}")
-    print(f"  Total in DB      : {total_targets} targets across {total_engagements} engagement(s)")
+    print(
+        f"  Unique devices   : {unique_devices} "
+        f"({total_sightings} sightings across {total_engagements} run(s))"
+    )
     print(f"  Findings         : {len(findings)}")
 
     sev_counts: dict[str, int] = {}
