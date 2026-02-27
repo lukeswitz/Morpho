@@ -20,6 +20,7 @@ from core.dongle import WhadDongle
 from core.models import Target, Finding, GattCharacteristic
 from core.db import insert_finding
 from core.logger import get_logger
+from core.pcap import pcap_path, attach_monitor, detach_monitor
 import config
 
 log = get_logger("s5_interact")
@@ -267,7 +268,10 @@ def _run_python_api(dongle: WhadDongle, target: Target, engagement_id: str) -> N
         f"({'random' if is_random else 'public'}) ..."
     )
 
+    _monitor = None
+    _pcap_file = pcap_path(engagement_id, 5, addr)
     central = dongle.central()
+    _monitor = attach_monitor(central, _pcap_file)
     periph_dev = None
 
     dongle.log_whad_connect(addr, is_random, CONNECT_TIMEOUT)
@@ -277,13 +281,16 @@ def _run_python_api(dongle: WhadDongle, target: Target, engagement_id: str) -> N
         )
     except ConnectionLostException:
         log.warning(f"Connection to {addr} lost during setup.")
+        detach_monitor(_monitor)
         return
     except Exception as exc:
         log.error(f"Failed to connect to {addr}: {type(exc).__name__}: {exc}")
+        detach_monitor(_monitor)
         return
 
     if periph_dev is None:
         log.warning(f"Could not connect to {addr} (timeout).")
+        detach_monitor(_monitor)
         return
 
     log.info(f"Connected to {addr}. Discovering GATT profile...")
@@ -386,6 +393,8 @@ def _run_python_api(dongle: WhadDongle, target: Target, engagement_id: str) -> N
             periph_dev.disconnect()
     except Exception:
         pass
+    finally:
+        detach_monitor(_monitor)
 
     if not chars:
         log.info(f"No characteristics discovered on {addr}.")
@@ -394,6 +403,7 @@ def _run_python_api(dongle: WhadDongle, target: Target, engagement_id: str) -> N
     _record_finding(
         addr, target, engagement_id,
         chars, unauth_readable, unauth_writable, device_info, notifications,
+        pcap_path=str(_pcap_file),
     )
     _print_summary(
         addr, target, chars, unauth_readable, unauth_writable, device_info,
@@ -622,6 +632,7 @@ def _record_finding(
     unauth_writable: list[GattCharacteristic],
     device_info: dict[str, str],
     notifications: list[dict] | None = None,
+    pcap_path: str | None = None,
 ) -> None:
     severity = _compute_severity(unauth_readable, unauth_writable, target)
 
@@ -685,6 +696,7 @@ def _record_finding(
             ],
             "notifications": notifications or [],
         },
+        pcap_path=pcap_path,
         engagement_id=engagement_id,
     )
     insert_finding(finding)

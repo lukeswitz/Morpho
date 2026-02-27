@@ -5,6 +5,7 @@ from core.dongle import WhadDongle
 from core.models import Target, Connection, Finding
 from core.db import insert_finding
 from core.logger import get_logger
+from core.pcap import pcap_path, attach_monitor, detach_monitor
 import config
 
 log = get_logger("s4_jam")
@@ -44,6 +45,9 @@ def run(
         )
 
     connector = dongle.ble_connector()
+    _monitor = None
+    _pcap = pcap_path(engagement_id, 4, target_addr)
+    _monitor = attach_monitor(connector, _pcap)
     packets_jammed = 0
     connection_disrupted = False
 
@@ -83,6 +87,7 @@ def run(
         log.error(f"Jamming error: {exc}")
     finally:
         try:
+            detach_monitor(_monitor)
             connector.stop()
         except Exception:
             pass
@@ -114,6 +119,7 @@ def run(
             "packets_jammed": packets_jammed,
             "connection_disrupted": connection_disrupted,
         },
+        pcap_path=str(_pcap),
         engagement_id=engagement_id,
     )
     insert_finding(finding)

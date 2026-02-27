@@ -15,6 +15,7 @@ from core.dongle import WhadDongle
 from core.models import Target
 from core.db import upsert_target
 from core.logger import get_logger
+from core.pcap import pcap_path, attach_monitor, detach_monitor
 from classify.fingerprint import classify_device, compute_risk_score
 from classify.manufacturer import decode_manufacturer, oui_lookup
 import config
@@ -182,7 +183,9 @@ def run(dongle: WhadDongle, engagement_id: str) -> list[Target]:
         "Listening on advertising channels 37, 38, 39..."
     )
 
+    _monitor = None
     scanner = dongle.scanner()
+    _monitor = attach_monitor(scanner, pcap_path(engagement_id, 1, "scan"))
     scanner.start()
 
     try:
@@ -297,6 +300,7 @@ def run(dongle: WhadDongle, engagement_id: str) -> list[Target]:
         log.info("Scan interrupted by user.")
     finally:
         try:
+            detach_monitor(_monitor)
             scanner.stop()
         except Exception:
             pass

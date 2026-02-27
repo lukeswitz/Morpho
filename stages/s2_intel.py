@@ -1,4 +1,10 @@
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
 from datetime import datetime, timezone
+from pathlib import Path
 from time import time
 
 from scapy.layers.bluetooth4LE import (
@@ -15,6 +21,7 @@ from core.dongle import WhadDongle
 from core.models import Target, Connection, Finding
 from core.db import insert_connection, insert_finding
 from core.logger import get_logger
+from core.pcap import pcap_path, attach_monitor, detach_monitor
 import config
 
 log = get_logger("s2_intel")
@@ -35,6 +42,11 @@ def run(
 
     sniffer = dongle.sniffer()
     sniffer.configure(advertisements=True)
+    _monitor = None
+    _s2_pcap: Path | None = None
+    if targets:
+        _s2_pcap = pcap_path(engagement_id, 2, targets[0].bd_address)
+        _monitor = attach_monitor(sniffer, _s2_pcap)
     sniffer.start()
 
     start_ts = time()
@@ -116,7 +128,7 @@ def run(
                 hop_increment=hop,
                 encrypted=encrypted,
                 legacy_pairing_observed=legacy_pairing,
-                pairing_pcap_path=None,
+                pairing_pcap_path=str(_s2_pcap) if (legacy_pairing and _s2_pcap) else None,
                 plaintext_data_captured=plaintext_data,
                 data_pcap_path=data_pcap,
                 timestamp=datetime.now(timezone.utc),
@@ -136,11 +148,18 @@ def run(
         log.info("Connection sniffing interrupted by user.")
     finally:
         try:
+            detach_monitor(_monitor)
             sniffer.stop()
         except Exception:
             pass
 
     _print_summary(connections)
+
+    if _s2_pcap is not None and _s2_pcap.exists():
+        for conn in connections:
+            if conn.legacy_pairing_observed:
+                _crack_pairing_keys(conn, str(_s2_pcap), engagement_id)
+
     return connections
 
 
@@ -298,6 +317,99 @@ def _evaluate_findings(conn: Connection, engagement_id: str) -> None:
             f"FINDING [critical] weak_pairing: "
             f"{conn.peripheral_addr}"
         )
+
+
+def _crack_pairing_keys(
+    conn: Connection,
+    pcap: str,
+    engagement_id: str,
+) -> None:
+    """Run wplay | wanalyze legacy_pairing_cracking and record extracted keys.
+
+    Args:
+        conn: Connection with legacy_pairing_observed=True.
+        pcap: Path to the PCAP file captured by the S2 sniffer.
+        engagement_id: Engagement ID for Finding storage.
+    """
+    if not shutil.which("wplay") or not shutil.which("wanalyze"):
+        log.warning("[S2] wplay/wanalyze not in PATH — skipping key extraction.")
+        return
+
+    cmd = f"wplay --flush {pcap} ble | wanalyze --json legacy_pairing_cracking"
+    log.info(f"[S2] Running pairing crack: {cmd}")
+
+    try:
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        keys = _parse_wanalyze_output(result.stdout)
+    except subprocess.TimeoutExpired:
+        log.warning("[S2] wanalyze timed out after 60s.")
+        return
+    except Exception as exc:
+        log.error(f"[S2] wanalyze error: {type(exc).__name__}: {exc}")
+        return
+
+    if not keys:
+        log.info("[S2] wanalyze: no keys extracted (capture may be incomplete).")
+        return
+
+    log.info(f"[S2] Pairing keys extracted: {list(keys.keys())}")
+
+    finding = Finding(
+        type="pairing_key_extracted",
+        severity="critical",
+        target_addr=conn.peripheral_addr,
+        description=(
+            f"Legacy BLE pairing between {conn.central_addr} and "
+            f"{conn.peripheral_addr} cracked offline. "
+            f"Keys extracted: {list(keys.keys())}. "
+            "All session traffic can now be decrypted with wsniff -d -k <KEY>."
+        ),
+        remediation=(
+            "Upgrade to LE Secure Connections (LESC). Legacy JustWorks and "
+            "passkey entry are vulnerable to offline STK recovery. "
+            "Rotate any credentials or sensitive data exchanged over this link."
+        ),
+        evidence={
+            "keys": keys,
+            "pcap_path": pcap,
+            "central": conn.central_addr,
+            "peripheral": conn.peripheral_addr,
+            "crack_command": cmd,
+        },
+        pcap_path=pcap,
+        engagement_id=engagement_id,
+    )
+    insert_finding(finding)
+    log.info(
+        f"FINDING [critical] pairing_key_extracted: {conn.peripheral_addr}"
+    )
+
+
+def _parse_wanalyze_output(stdout: str) -> dict[str, str]:
+    """Extract BLE key fields from wanalyze --json output.
+
+    Returns empty dict if output is not JSON or contains no recognised keys.
+
+    NOTE: Verify key names against a real capture before relying on this.
+    Common wanalyze legacy_pairing_cracking fields: stk, ltk, rand, ediv, irk, csrk.
+    """
+    if not stdout.strip():
+        return {}
+    try:
+        data = json.loads(stdout.strip())
+        if not isinstance(data, dict):
+            return {}
+        key_fields = ("stk", "ltk", "rand", "ediv", "irk", "csrk")
+        return {k: str(v) for k, v in data.items() if k in key_fields and v}
+    except json.JSONDecodeError as exc:
+        log.debug(f"wanalyze non-JSON output: {exc}. Raw: {stdout[:200]}")
+        return {}
 
 
 def _print_summary(connections: list[Connection]) -> None:

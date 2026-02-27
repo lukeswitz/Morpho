@@ -13,6 +13,7 @@ from core.dongle import WhadDongle
 from core.models import Target, Finding
 from core.db import insert_finding
 from core.logger import get_logger
+from core.pcap import pcap_path, attach_monitor, detach_monitor
 import config
 
 log = get_logger("s3_clone")
@@ -34,6 +35,9 @@ def run(
     adv_data = _build_adv_data(target)
 
     periph = dongle.peripheral(profile=profile)
+    _monitor = None
+    _pcap = pcap_path(engagement_id, 3, target.bd_address)
+    _monitor = attach_monitor(periph, _pcap)
 
     if dongle.caps.can_spoof_bd_addr:
         try:
@@ -93,6 +97,7 @@ def run(
         log.info("Clone interrupted by user.")
     finally:
         try:
+            detach_monitor(_monitor)
             periph.stop()
         except Exception:
             pass
@@ -122,6 +127,7 @@ def run(
             "connections_received": connections_received,
             "duration_seconds": CLONE_DURATION,
         },
+        pcap_path=str(_pcap),
         engagement_id=engagement_id,
     )
     insert_finding(finding)

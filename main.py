@@ -64,6 +64,11 @@ def _parse_args() -> argparse.Namespace:
         metavar="BD_ADDR",
         help="Focus on specific BD address (can repeat)",
     )
+    p.add_argument(
+        "--proxy-interface",
+        default=config.PROXY_INTERFACE,
+        help=f"Second interface for Stage 6 wble-proxy (default: {config.PROXY_INTERFACE})",
+    )
     return p.parse_args()
 
 
@@ -74,6 +79,7 @@ def _apply_args(args: argparse.Namespace) -> None:
         config.ACTIVE_GATE = False
     if args.targets:
         config.TARGET_FILTER = [a.upper() for a in args.targets]
+    config.PROXY_INTERFACE = args.proxy_interface
 
 
 def _banner(eng_id: str, name: str, location: str) -> None:
@@ -84,6 +90,7 @@ def _banner(eng_id: str, name: str, location: str) -> None:
     print(f"  Engagement : {name} ({eng_id})")
     print(f"  Location   : {location or 'unspecified'}")
     print(f"  Interface  : {config.INTERFACE}")
+    print(f"  Proxy iface: {config.PROXY_INTERFACE}")
     print(f"  Started    : {ts}")
     print(f"{line}\n")
 
@@ -226,6 +233,37 @@ def main() -> None:
                     log.info("Stage 5 skipped by operator.")
             else:
                 log.info("Stage 5 skipped: no connectable targets.")
+
+        if 6 in stages_requested and targets:
+            connectable = [t for t in targets if t.connectable]
+            if connectable:
+                from stages import s6_proxy
+
+                stage_banner(6, "MITM Proxy", passive=False)
+                proxy_picks = select_targets(
+                    connectable,
+                    prompt="Stage 6 — Select target for MITM proxy",
+                    default_all=False,
+                    smart_skip_classes={"it_gear"},
+                )
+                if proxy_picks:
+                    if len(proxy_picks) > 1:
+                        log.warning(
+                            "[S6] wble-proxy runs one target at a time; "
+                            f"using {proxy_picks[0].bd_address}. "
+                            "Rerun with --stages 6 for remaining targets."
+                        )
+                    if not config.ACTIVE_GATE or active_gate(
+                        6,
+                        f"MITM proxy against {proxy_picks[0].bd_address} "
+                        f"({proxy_picks[0].name or proxy_picks[0].device_class}). "
+                        "Requires two RF interfaces. Authorized targets only.",
+                    ):
+                        s6_proxy.run(dongle, proxy_picks[0], eng_id)
+                else:
+                    log.info("Stage 6 skipped by operator.")
+            else:
+                log.info("Stage 6 skipped: no connectable targets.")
 
     except KeyboardInterrupt:
         log.info("Run aborted by user.")
