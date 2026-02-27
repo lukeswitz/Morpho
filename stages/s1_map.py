@@ -1,0 +1,371 @@
+from datetime import datetime, timezone
+
+from scapy.layers.bluetooth4LE import (
+    BTLE_ADV,
+    BTLE_ADV_IND,
+    BTLE_ADV_NONCONN_IND,
+    BTLE_ADV_SCAN_IND,
+    BTLE_ADV_DIRECT_IND,
+    BTLE_SCAN_RSP,
+)
+
+from whad.ble import Scanner
+
+from core.dongle import WhadDongle
+from core.models import Target
+from core.db import upsert_target
+from core.logger import get_logger
+from classify.fingerprint import classify_device, compute_risk_score
+from classify.manufacturer import decode_manufacturer, oui_lookup
+import config
+
+log = get_logger("s1_map")
+
+AD_FLAGS = 0x01
+AD_UUID16_INCOMPLETE = 0x02
+AD_UUID16_COMPLETE = 0x03
+AD_UUID128_INCOMPLETE = 0x06
+AD_UUID128_COMPLETE = 0x07
+AD_SHORT_NAME = 0x08
+AD_COMPLETE_NAME = 0x09
+AD_TX_POWER = 0x0A
+AD_MANUFACTURER = 0xFF
+
+_ADV_LAYERS = (
+    BTLE_ADV_IND,
+    BTLE_ADV_NONCONN_IND,
+    BTLE_ADV_SCAN_IND,
+    BTLE_ADV_DIRECT_IND,
+    BTLE_SCAN_RSP,
+)
+
+
+def _extract_adv_addr(pkt) -> str | None:
+    for layer_cls in _ADV_LAYERS:
+        layer = pkt.getlayer(layer_cls)
+        if layer is not None and hasattr(layer, "AdvA"):
+            return str(layer.AdvA)
+    return None
+
+
+def _pdu_type(pkt) -> str:
+    if pkt.haslayer(BTLE_ADV_IND):
+        return "ADV_IND"
+    if pkt.haslayer(BTLE_ADV_NONCONN_IND):
+        return "ADV_NONCONN_IND"
+    if pkt.haslayer(BTLE_ADV_SCAN_IND):
+        return "ADV_SCAN_IND"
+    if pkt.haslayer(BTLE_ADV_DIRECT_IND):
+        return "ADV_DIRECT_IND"
+    if pkt.haslayer(BTLE_SCAN_RSP):
+        return "SCAN_RSP"
+    return "ADV_UNKNOWN"
+
+
+def _addr_type_label(pkt, bd_addr: str) -> str:
+    try:
+        adv_layer = pkt.getlayer(BTLE_ADV)
+        if adv_layer is None:
+            return "unknown"
+        tx_add = adv_layer.TxAdd
+    except AttributeError:
+        return "unknown"
+
+    if tx_add == 0:
+        return "public"
+
+    try:
+        addr_bytes = bytes.fromhex(bd_addr.replace(":", ""))
+        top2 = (addr_bytes[0] & 0xC0) >> 6
+    except Exception:
+        return "random"
+
+    return {
+        0b11: "random_static",
+        0b00: "random_non_resolvable",
+        0b01: "random_resolvable",
+    }.get(top2, "random")
+
+
+def _raw_ad_bytes(pkt) -> bytes:
+    for layer_cls in _ADV_LAYERS:
+        inner = pkt.getlayer(layer_cls)
+        if inner is not None:
+            raw = bytes(inner.payload)
+            if raw:
+                return raw
+    return b""
+
+
+def _parse_ad_records(raw_bytes: bytes) -> dict:
+    result = {
+        "name": None,
+        "services": [],
+        "tx_power": None,
+        "company_id": None,
+        "manufacturer_data": None,
+        "flags": None,
+    }
+
+    i = 0
+    while i < len(raw_bytes):
+        length = raw_bytes[i]
+        if length == 0:
+            i += 1
+            continue
+        if i + length >= len(raw_bytes):
+            break
+
+        ad_type = raw_bytes[i + 1]
+        payload = raw_bytes[i + 2 : i + 1 + length]
+        i += 1 + length
+
+        if ad_type in (AD_COMPLETE_NAME, AD_SHORT_NAME):
+            try:
+                result["name"] = payload.decode(
+                    "utf-8", errors="replace"
+                ).strip("\x00")
+            except Exception:
+                pass
+
+        elif ad_type in (AD_UUID16_COMPLETE, AD_UUID16_INCOMPLETE):
+            for j in range(0, len(payload) - 1, 2):
+                uuid_val = int.from_bytes(payload[j : j + 2], "little")
+                result["services"].append(f"{uuid_val:04X}")
+
+        elif ad_type in (AD_UUID128_COMPLETE, AD_UUID128_INCOMPLETE):
+            for j in range(0, len(payload), 16):
+                chunk = payload[j : j + 16]
+                if len(chunk) == 16:
+                    uuid_str = "-".join(
+                        [
+                            chunk[12:16][::-1].hex(),
+                            chunk[10:12][::-1].hex(),
+                            chunk[8:10][::-1].hex(),
+                            chunk[6:8][::-1].hex(),
+                            chunk[0:6][::-1].hex(),
+                        ]
+                    )
+                    result["services"].append(uuid_str.upper())
+
+        elif ad_type == AD_TX_POWER:
+            if payload:
+                result["tx_power"] = int.from_bytes(
+                    payload[:1], "big", signed=True
+                )
+
+        elif ad_type == AD_MANUFACTURER:
+            result["manufacturer_data"] = payload
+            company_id, _ = decode_manufacturer(payload)
+            result["company_id"] = company_id
+
+        elif ad_type == AD_FLAGS:
+            if payload:
+                result["flags"] = payload[0]
+
+    return result
+
+
+def run(dongle: WhadDongle, engagement_id: str) -> list[Target]:
+    targets: dict[str, Target] = {}
+
+    log.info(
+        f"Starting passive scan for {config.SCAN_DURATION}s "
+        f"on {config.INTERFACE}"
+    )
+    log.info(
+        "Listening on advertising channels 37, 38, 39..."
+    )
+
+    scanner = dongle.scanner()
+    scanner.start()
+
+    try:
+        for pkt in dongle.sniff_iter(scanner, total_duration=config.SCAN_DURATION):
+            now = datetime.now(timezone.utc)
+
+            try:
+                bd_addr = _extract_adv_addr(pkt)
+                if bd_addr is None:
+                    continue
+                bd_addr = bd_addr.upper()
+
+                rssi = 0
+                meta = getattr(pkt, "metadata", None)
+                if meta is not None:
+                    rssi = getattr(meta, "rssi", 0) or 0
+
+                if (
+                    config.TARGET_FILTER
+                    and bd_addr not in config.TARGET_FILTER
+                ):
+                    continue
+
+                pdu = _pdu_type(pkt)
+
+                if pdu == "SCAN_RSP" and bd_addr in targets:
+                    raw_ad = _raw_ad_bytes(pkt)
+                    ad = _parse_ad_records(raw_ad)
+                    t = targets[bd_addr]
+                    t.last_seen = now
+                    if ad["name"] and not t.name:
+                        t.name = ad["name"]
+                        t.device_class = classify_device(t)
+                        t.risk_score = compute_risk_score(t)
+                    for svc in ad["services"]:
+                        if svc not in t.services:
+                            t.services.append(svc)
+                    upsert_target(t)
+                    continue
+
+                raw_ad = _raw_ad_bytes(pkt)
+                ad = _parse_ad_records(raw_ad)
+                addr_type = _addr_type_label(pkt, bd_addr)
+                connectable = pdu in ("ADV_IND", "ADV_DIRECT_IND")
+
+                if bd_addr not in targets:
+                    t = Target(
+                        bd_address=bd_addr,
+                        address_type=addr_type,
+                        adv_type=pdu,
+                        name=ad["name"],
+                        manufacturer=None,
+                        company_id=ad["company_id"],
+                        services=ad["services"],
+                        tx_power=ad["tx_power"],
+                        rssi_samples=[rssi],
+                        rssi_avg=float(rssi),
+                        device_class="unknown",
+                        connectable=connectable,
+                        first_seen=now,
+                        last_seen=now,
+                        raw_adv_records=[raw_ad] if raw_ad else [],
+                        risk_score=0,
+                        engagement_id=engagement_id,
+                    )
+
+                    if addr_type == "public":
+                        oui_name = oui_lookup(bd_addr)
+                        if oui_name:
+                            t.manufacturer = oui_name
+
+                    if ad["company_id"] is not None:
+                        _, mfr_name = decode_manufacturer(
+                            ad["manufacturer_data"] or b"\x00\x00"
+                        )
+                        t.manufacturer = mfr_name
+
+                    t.device_class = classify_device(t)
+                    t.risk_score = compute_risk_score(t)
+                    targets[bd_addr] = t
+                    _log_new_target(t)
+
+                else:
+                    t = targets[bd_addr]
+                    t.last_seen = now
+                    t.rssi_samples.append(rssi)
+                    t.rssi_avg = sum(t.rssi_samples) / len(
+                        t.rssi_samples
+                    )
+
+                    if ad["name"] and not t.name:
+                        t.name = ad["name"]
+                        t.device_class = classify_device(t)
+                        t.risk_score = compute_risk_score(t)
+
+                    for svc in ad["services"]:
+                        if svc not in t.services:
+                            t.services.append(svc)
+
+                upsert_target(targets[bd_addr])
+
+            except Exception as exc:
+                log.debug(f"Packet parse error: {exc}")
+                continue
+
+    except KeyboardInterrupt:
+        log.info("Scan interrupted by user.")
+    finally:
+        try:
+            scanner.stop()
+        except Exception:
+            pass
+
+    result = sorted(
+        targets.values(), key=lambda x: x.risk_score, reverse=True
+    )
+    _print_summary(result)
+    return result
+
+
+def _log_new_target(t: Target) -> None:
+    risk_tag = _risk_label(t.risk_score)
+    log.info(
+        f"[{risk_tag}] {t.bd_address}  "
+        f"{t.address_type:<22}  "
+        f"{t.device_class:<14}  "
+        f"conn={t.connectable}  "
+        f"rssi={t.rssi_samples[-1]:>4} dBm  "
+        f"name={t.name or '—'}"
+    )
+    if t.services:
+        log.debug(f"         services: {', '.join(t.services)}")
+    if t.manufacturer:
+        log.debug(f"         manufacturer: {t.manufacturer}")
+
+
+def _risk_label(score: int) -> str:
+    if score >= 8:
+        return "CRIT"
+    if score >= 6:
+        return "HIGH"
+    if score >= 4:
+        return "MED "
+    if score >= 2:
+        return "LOW "
+    return "INFO"
+
+
+def _print_summary(targets: list[Target]) -> None:
+    print("\n" + "─" * 72)
+    print(f"  STAGE 1 SUMMARY -- {len(targets)} devices discovered")
+    print("─" * 72)
+    print(
+        f"  {'RISK':<6} {'BD ADDRESS':<20} {'TYPE':<14} "
+        f"{'CONN':<5} {'RSSI':>6}  NAME"
+    )
+    print("─" * 72)
+    for t in targets:
+        print(
+            f"  {_risk_label(t.risk_score):<6} "
+            f"{t.bd_address:<20} "
+            f"{t.device_class:<14} "
+            f"{'yes' if t.connectable else 'no':<5} "
+            f"{t.rssi_avg:>5.0f}  "
+            f"{t.name or '—'}"
+        )
+    print("─" * 72)
+
+    by_class: dict[str, list[Target]] = {}
+    for t in targets:
+        by_class.setdefault(t.device_class, []).append(t)
+
+    print("\n  Device class breakdown:")
+    for cls, items in sorted(
+        by_class.items(), key=lambda x: -len(x[1])
+    ):
+        connectable_count = sum(1 for t in items if t.connectable)
+        print(
+            f"    {cls:<16} {len(items):>3} total  "
+            f"{connectable_count:>3} connectable"
+        )
+
+    high_risk = [t for t in targets if t.risk_score >= 6]
+    if high_risk:
+        print(f"\n  HIGH/CRITICAL targets ({len(high_risk)}):")
+        for t in high_risk:
+            print(
+                f"    {t.bd_address}  score={t.risk_score}  "
+                f"{t.name or '(unnamed)'}  {t.device_class}"
+            )
+    print()
