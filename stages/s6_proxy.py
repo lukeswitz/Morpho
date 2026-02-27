@@ -53,7 +53,7 @@ def run(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
         f" -i {config.INTERFACE}"
         f" -p {config.PROXY_INTERFACE}"
         f" {rand_flag}"
-        f" --output {_pcap}"
+        f" --output {_monitor['pcap_path']}"
         f" {addr}"
     )
 

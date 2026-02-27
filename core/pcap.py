@@ -1,14 +1,8 @@
-"""
-core/pcap.py — PCAP path generation and PcapWriterMonitor lifecycle helpers.
-
-All stages import pcap_path(), attach_monitor(), and detach_monitor() from here.
-PCAP failure must never crash a stage — attach_monitor() is exception-safe.
-"""
-
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import subprocess
 
 import config
 from core.logger import get_logger
@@ -33,39 +27,32 @@ def pcap_path(engagement_id: str, stage: int, addr: str) -> Path:
     return config.PCAP_DIR / filename
 
 
-def attach_monitor(connector: Any, path: Path) -> Any | None:
-    """Attach a PcapWriterMonitor to a WHAD connector before start().
-
-    Catches all exceptions — PCAP failure must never crash a stage.
+def attach_monitor(connector: Any, path: Path) -> dict | None:
+    """Store PCAP path for CLI tool capture (Python API has no monitor).
 
     Args:
-        connector: Any WHAD connector (Scanner, Sniffer, Peripheral, BLE, Central).
+        connector: Any WHAD connector (unused, for API compatibility).
         path: Filesystem path for the PCAP output file.
 
     Returns:
-        The monitor instance to pass to detach_monitor(), or None on failure.
+        Dict with pcap_path key, or None on failure.
     """
     try:
-        from whad.monitors import PcapWriterMonitor
-        monitor = PcapWriterMonitor(str(path))
-        monitor.attach(connector)
-        monitor.start()
-        log.debug(f"PCAP monitor attached: {path}")
-        return monitor
+        path.parent.mkdir(parents=True, exist_ok=True)
+        log.debug(f"PCAP will be captured to: {path}")
+        return {"pcap_path": str(path)}
     except Exception as exc:
-        log.warning(f"PcapWriterMonitor attach failed for {path}: {exc}")
+        log.warning(f"PCAP path setup failed for {path}: {exc}")
         return None
 
 
-def detach_monitor(monitor: Any | None) -> None:
-    """Stop and close a PcapWriterMonitor. Safe to call with None.
+def detach_monitor(monitor: dict | None) -> None:
+    """No-op for Python API (PCAP handled by CLI tools).
 
-    Always call in a finally block to ensure the file is flushed.
+    Safe to call with None or dict from attach_monitor().
     """
     if monitor is None:
         return
-    try:
-        monitor.close()
-        log.debug("PCAP monitor closed.")
-    except Exception as exc:
-        log.warning(f"PcapWriterMonitor close error: {exc}")
+    pcap_path = monitor.get("pcap_path")
+    if pcap_path:
+        log.debug(f"PCAP capture complete: {pcap_path}")
