@@ -15,7 +15,6 @@ Mirrors Stage 5's dongle lifecycle: close WhadDevice before CLI, reopen after.
 
 from __future__ import annotations
 
-import os
 import re
 import shutil
 import subprocess
@@ -48,13 +47,16 @@ def run(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
     addr = target.bd_address
     rand_flag = "-r" if target.address_type != "public" else ""
     _pcap = pcap_path(engagement_id, 6, addr)
+    live_wireshark = _ask_wireshark()
 
+    wireshark_flag = "-w" if live_wireshark else ""
     cmd = (
         f"wble-proxy"
         f" -i {config.INTERFACE}"
         f" -p {config.PROXY_INTERFACE}"
         f" {rand_flag}"
-        f" --output {_pcap}"
+        f" {wireshark_flag}"
+        f" -o {_pcap}"
         f" {addr}"
     )
 
@@ -62,11 +64,13 @@ def run(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
     log.info(f"[S6] Attack interface : {config.INTERFACE}")
     log.info(f"[S6] Proxy interface  : {config.PROXY_INTERFACE}")
     log.info(f"[S6] PCAP output      : {_pcap}")
+    if live_wireshark:
+        log.info("[S6] Wireshark will launch automatically (-w)")
     log.debug(f"[S6] Command: {cmd}")
 
     dongle.device.close()
     import time as _time
-    _time.sleep(0.5)   # let OS/firmware release the port before CLI opens it
+    _time.sleep(0.5)
 
     stdout = ""
     stderr = ""
@@ -110,6 +114,22 @@ def run(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
         connections_accepted=connections_accepted,
     )
     _print_summary(target, data_intercepted, connections_accepted, str(_pcap))
+
+
+def _ask_wireshark() -> bool:
+    """Prompt operator to launch Wireshark live during the proxy session.
+
+    Returns True if operator wants live Wireshark (-w flag), False otherwise.
+    """
+    if not shutil.which("wireshark"):
+        return False
+    try:
+        raw = input(
+            "\n  Launch Wireshark live during proxy session? [y/N]: "
+        ).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return raw in ("y", "yes")
 
 
 def _prereqs_ok(target: Target) -> bool:
@@ -244,24 +264,25 @@ def _discover_interfaces() -> list[tuple[str, str]]:
 
 
 def _reopen_dongle(dongle: WhadDongle) -> None:
-    """Re-attach the underlying WhadDevice after CLI run, with retry."""
+    """Re-attach the underlying WhadDevice, polling every 0.5s up to 6s."""
     import time as _time
-    for attempt in range(3):
+    deadline = _time.time() + 6.0
+    attempt = 0
+    last_exc: Exception | None = None
+    while _time.time() < deadline:
         try:
             dongle.device = WhadDevice.create(config.INTERFACE)
+            if attempt > 0:
+                log.debug(f"[S6] Reopen succeeded after {attempt * 0.5:.1f}s")
             return
         except Exception as exc:
-            if attempt < 2:
-                log.debug(
-                    f"[S6] Reopen attempt {attempt + 1} failed "
-                    f"({type(exc).__name__}: {exc!r}) — retrying in 1s ..."
-                )
-                _time.sleep(1.0)
-            else:
-                log.warning(
-                    f"[S6] Could not reopen WHAD device after 3 attempts: "
-                    f"{type(exc).__name__}: {exc!r}"
-                )
+            last_exc = exc
+            attempt += 1
+            _time.sleep(0.5)
+    log.warning(
+        f"[S6] Could not reopen WHAD device after 6s "
+        f"({type(last_exc).__name__}: {last_exc!r})"
+    )
 
 
 def _parse_proxy_output(stdout: str) -> tuple[bool, bool]:
@@ -358,4 +379,7 @@ def _print_summary(
     print(f"  Connections accepted: {'yes' if connections_accepted else 'no'}")
     print(f"  Data intercepted    : {'yes' if data_intercepted else 'no'}")
     print(f"  Severity            : {severity.upper()}")
+    print(f"\n  Analyze captured traffic:")
+    print(f"    wireshark {pcap_path_str}")
+    print(f"    tshark -r {pcap_path_str} -Y btle")
     print("-" * 72 + "\n")

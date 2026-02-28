@@ -192,6 +192,7 @@ def main() -> None:
                         connectable,
                         prompt="Stage 4 — Pick ONE target to jam",
                         smart_skip_classes={"it_gear"},
+                        max_count=1,
                     )
                     if jam_picks:
                         jam_target = jam_picks[0]
@@ -228,9 +229,7 @@ def main() -> None:
                         "and enumerate GATT profiles.",
                     ):
                         from stages import s5_interact
-                        for idx, t in enumerate(gatt_picks):
-                            if idx > 0:
-                                time.sleep(3.0)  # settle between back-to-back connections
+                        for t in gatt_picks:
                             s5_interact.run(dongle, t, eng_id)
                 else:
                     log.info("Stage 5 skipped by operator.")
@@ -248,6 +247,7 @@ def main() -> None:
                     prompt="Stage 6 — Select target for MITM proxy",
                     default_all=False,
                     smart_skip_classes={"it_gear"},
+                    max_count=1,
                 )
                 if proxy_picks:
                     if len(proxy_picks) > 1:

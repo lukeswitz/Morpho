@@ -38,7 +38,6 @@ def active_gate(stage: int, description: str) -> bool:
     Blocks execution until analyst explicitly approves an active stage.
     Returns True to proceed, False to skip.
     """
-    print(f"\n{'--^----' * 10}")
     print(f"  ACTIVE STAGE {stage} GATE")
     print(f"  {description}")
     print(f"\n{'--^----' * 10}")
@@ -62,20 +61,29 @@ def select_targets(
     prompt: str = "Select targets",
     default_all: bool = False,
     smart_skip_classes: "set[str] | None" = None,
+    max_count: "int | None" = None,
 ) -> "list[Target]":
     """
     Interactive target picker for active stages.
 
     Displays a numbered list of candidates (sorted by risk descending).
-    Operator enters: numbers (1,3,5), 'all', 'smart', or 'skip'.
+
+    Multi-pick mode (max_count=None):
+      Operator enters: numbers (1,3,5), 'all', 'smart', or 'skip'.
+      'smart' returns all non-skipped targets.
+
+    Single-pick mode (max_count=1):
+      Operator enters: one number, 'smart' (auto-picks highest-risk non-skipped),
+      or 'skip'. 'all' and multi-number inputs are rejected.
 
     smart_skip_classes: device classes to exclude in 'smart' mode.
-    Returns the selected subset (empty = skip stage).
+    Returns the selected subset (empty list = skip stage).
     """
     if not candidates:
         return []
 
     smart_skip_classes = smart_skip_classes or set()
+    single_pick = max_count == 1
 
     _RISK = {
         range(8, 11): "CRIT",
@@ -107,55 +115,71 @@ def select_targets(
         )
     print()
 
-    smart_label = (
-        f"smart (skip {', '.join(sorted(smart_skip_classes))})"
-        if smart_skip_classes
-        else "smart"
-    )
-    print(
-        f"  Enter: numbers (e.g. 1,3), 'all', '{smart_label}', or 'skip'"
-    )
-    if default_all:
-        print("  [Enter] = all")
+    if single_pick:
+        skip_desc = (
+            f"auto-picks highest-risk non-{'/'.join(sorted(smart_skip_classes))}"
+            if smart_skip_classes
+            else "auto-picks highest-risk"
+        )
+        print(f"  Enter: one number (1–{len(sorted_targets)}), 'smart' ({skip_desc}), or 'skip'")
+    else:
+        smart_label = (
+            f"smart (skip {', '.join(sorted(smart_skip_classes))})"
+            if smart_skip_classes
+            else "smart"
+        )
+        print(f"  Enter: numbers (e.g. 1,3), 'all', '{smart_label}', or 'skip'")
+        if default_all:
+            print("  [Enter] = all")
 
     while True:
         raw = input("  Selection: ").strip().lower()
 
-        if raw == "" and default_all:
+        if raw == "" and default_all and not single_pick:
             return sorted_targets
 
         if raw == "skip":
             return []
 
-        if raw == "all":
-            return sorted_targets
-
         if raw == "smart":
-            selected = [
+            filtered = [
                 t for t in sorted_targets
                 if t.device_class not in smart_skip_classes
             ]
-            if not selected:
+            if not filtered:
                 print(
                     f"  No targets remain after smart filter "
                     f"(all are {', '.join(sorted(smart_skip_classes))})."
                 )
                 continue
-            print(f"  Smart selection: {len(selected)} target(s)")
-            return selected
+            if single_pick:
+                chosen = filtered[0]
+                print(
+                    f"  Auto-selected: [{chosen.bd_address}] "
+                    f"{chosen.name or chosen.device_class} (risk={chosen.risk_score})"
+                )
+                return [chosen]
+            print(f"  Smart selection: {len(filtered)} target(s)")
+            return filtered
 
-        # Parse comma/space separated numbers
+        if raw == "all":
+            if single_pick:
+                print("  Enter a single number to select one target, or 'skip'.")
+                continue
+            return sorted_targets
+
+        # Parse numbers
         try:
             indices = [int(x.strip()) for x in raw.replace(",", " ").split()]
             if not indices:
                 raise ValueError
+            if single_pick and len(indices) > 1:
+                print("  This stage requires exactly one target — enter a single number.")
+                continue
             selected = []
             for idx in indices:
                 if not 1 <= idx <= len(sorted_targets):
-                    print(
-                        f"  Invalid selection: {idx} "
-                        f"(valid range 1–{len(sorted_targets)})"
-                    )
+                    print(f"  Invalid: {idx} (valid range 1–{len(sorted_targets)})")
                     selected = []
                     break
                 selected.append(sorted_targets[idx - 1])
@@ -164,7 +188,10 @@ def select_targets(
         except ValueError:
             pass
 
-        print(
-            f"  Enter numbers (1–{len(sorted_targets)}), "
-            f"'all', 'smart', or 'skip'."
-        )
+        if single_pick:
+            print(f"  Enter a number (1–{len(sorted_targets)}), 'smart', or 'skip'.")
+        else:
+            print(
+                f"  Enter numbers (1–{len(sorted_targets)}), "
+                f"'all', 'smart', or 'skip'."
+            )

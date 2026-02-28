@@ -28,7 +28,7 @@ log = get_logger("s5_interact")
 
 CONNECT_TIMEOUT = 15
 GATT_DISCOVER_TIMEOUT = 20   # seconds for discover() call
-CLI_TIMEOUT = 45             # seconds for the full wble-connect | wble-central run
+CLI_TIMEOUT = 30             # seconds for the full wble-connect | wble-central run
 
 # Standard GATT characteristic UUID (int) → human-readable name
 UUID_NAMES: dict[int, str] = {
@@ -63,7 +63,8 @@ PROP_WRITE      = 0x08
 PROP_NOTIFY     = 0x10
 PROP_INDICATE   = 0x20
 
-NOTIFY_HARVEST_SECS = 20   # how long to listen for notifications per device
+NOTIFY_HARVEST_SECS = 15   # max wall-clock time to listen for notifications
+NOTIFY_SILENCE_SECS = 4    # exit early after this many seconds with no new notifications
 
 
 def run(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
@@ -94,10 +95,9 @@ def _run_cli(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
         f"({'random' if is_random else 'public'}) ..."
     )
 
-    # Release the WHAD device so wble-connect can open it.
     dongle.device.close()
     import time as _time
-    _time.sleep(0.5)   # let OS/firmware release the port before CLI opens it
+    _time.sleep(0.5)
 
     cmd = (
         f"wble-connect -i {config.INTERFACE} {rand_flag} {addr} "
@@ -141,6 +141,7 @@ def _run_cli(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
     )
 
     if not chars:
+        log.debug(f"[CLI] Raw profile stdout for {addr}: {stdout[:300]!r}")
         log.info(f"[CLI] No characteristics discovered on {addr}.")
         return
 
@@ -154,24 +155,25 @@ def _run_cli(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
 
 
 def _reopen_dongle(dongle: WhadDongle) -> None:
-    """Re-attach the underlying WhadDevice after a CLI run, with retry."""
+    """Re-attach the underlying WhadDevice, polling every 0.5s up to 6s."""
     import time as _time
-    for attempt in range(3):
+    deadline = _time.time() + 6.0
+    attempt = 0
+    last_exc: Exception | None = None
+    while _time.time() < deadline:
         try:
             dongle.device = WhadDevice.create(config.INTERFACE)
+            if attempt > 0:
+                log.debug(f"Reopen succeeded after {attempt * 0.5:.1f}s")
             return
         except Exception as exc:
-            if attempt < 2:
-                log.debug(
-                    f"Reopen attempt {attempt + 1} failed "
-                    f"({type(exc).__name__}: {exc!r}) — retrying in 1s ..."
-                )
-                _time.sleep(1.0)
-            else:
-                log.warning(
-                    f"Could not reopen WHAD device after 3 attempts: "
-                    f"{type(exc).__name__}: {exc!r}"
-                )
+            last_exc = exc
+            attempt += 1
+            _time.sleep(0.5)
+    log.warning(
+        f"Could not reopen WHAD device after 6s "
+        f"({type(last_exc).__name__}: {last_exc!r})"
+    )
 
 
 def _parse_cli_profile(
@@ -495,7 +497,19 @@ def _harvest_notifications(
         return []
 
     log.info(f"  Listening ({subscribed} handle(s) subscribed) ...")
-    _time.sleep(NOTIFY_HARVEST_SECS)
+    deadline = _time.time() + NOTIFY_HARVEST_SECS
+    last_count = 0
+    silence_start = _time.time()
+    while _time.time() < deadline:
+        _time.sleep(0.2)
+        with lock:
+            current_count = len(collected)
+        if current_count > last_count:
+            last_count = current_count
+            silence_start = _time.time()
+        elif _time.time() - silence_start >= NOTIFY_SILENCE_SECS:
+            log.debug(f"  No new notifications for {NOTIFY_SILENCE_SECS}s, exiting early")
+            break
 
     log.info(
         f"  Notification harvest complete: {len(collected)} update(s) received"

@@ -62,13 +62,6 @@ _FUZZ_PAYLOADS: list[tuple[str, str, str]] = [
 
 
 def run(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
-    """Run the CLI GATT fuzz pipeline against a single target.
-
-    Args:
-        dongle: Active WhadDongle (closed for CLI, reopened in finally).
-        target: Connectable target to fuzz.
-        engagement_id: Engagement ID for PCAP naming and Finding storage.
-    """
     if not _cli_available():
         log.error(
             "[S7] wble-connect or wble-central not found in PATH. "
@@ -78,9 +71,7 @@ def run(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
 
     addr = target.bd_address
     rand_flag = "-r" if target.address_type != "public" else ""
-    _pcap = pcap_path(engagement_id, 7, addr)
 
-    # ── Phase 1: Profile ────────────────────────────────────────────────────
     log.info(f"[S7] Phase 1 — profiling {addr} to discover writable handles ...")
     dongle.device.close()
     time.sleep(0.5)
@@ -110,14 +101,12 @@ def run(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
         log.error(f"[S7] Profile subprocess error: {type(exc).__name__}: {exc}")
         _reopen_dongle(dongle)
         return
-    finally:
-        _reopen_dongle(dongle)
 
     writable_handles = _parse_writable_handles(profile_stdout)
     if not writable_handles:
         log.info(f"[S7] No writable handles found on {addr} — nothing to fuzz.")
-        _record_finding(target, engagement_id, str(_pcap), [], 0, 0, False)
-        _print_summary(target, [], 0, 0, False, str(_pcap))
+        _record_finding(target, engagement_id, [], 0, 0, 0, False)
+        _print_summary(target, [], 0, 0, 0, False)
         return
 
     log.info(
@@ -125,7 +114,6 @@ def run(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
         f"{writable_handles} — building fuzz script ..."
     )
 
-    # ── Phase 2: Generate script + Fuzz ─────────────────────────────────────
     script_path, total_writes = _write_fuzz_script(writable_handles, engagement_id)
     log.info(
         f"[S7] Phase 2 — fuzzing {addr} with {total_writes} writes "
@@ -145,7 +133,7 @@ def run(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
     try:
         cmd_fuzz = (
             f"wble-connect -i {config.INTERFACE} {rand_flag} {addr} "
-            f"| wble-central --file {script_path} --output {_pcap}"
+            f"| wble-central --file {script_path}"
         )
         log.debug(f"[S7] Fuzz cmd: {cmd_fuzz}")
         result = subprocess.run(
@@ -159,7 +147,6 @@ def run(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
         fuzz_stderr = result.stderr
         fuzz_rc = result.returncode
     except subprocess.TimeoutExpired:
-        # Timeout mid-fuzz: could be hang from crash
         log.warning(
             f"[S7] Fuzz timed out after {FUZZ_TIMEOUT}s — "
             "device may have crashed or stopped responding."
@@ -173,7 +160,6 @@ def run(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
     if fuzz_stderr.strip():
         log.debug(f"[S7] Fuzz stderr: {fuzz_stderr.strip()[:200]}")
 
-    # Heuristic crash detection from stdout
     if not crash_detected:
         crash_detected = _detect_crash(fuzz_stdout, fuzz_rc)
 
@@ -185,19 +171,18 @@ def run(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
         f"crash={crash_detected}  exit={fuzz_rc}"
     )
 
-    # Clean up temp script
     try:
         Path(script_path).unlink(missing_ok=True)
     except Exception:
         pass
 
     _record_finding(
-        target, engagement_id, str(_pcap),
+        target, engagement_id,
         writable_handles, writes_sent, total_writes, error_count, crash_detected,
     )
     _print_summary(
         target, writable_handles, writes_sent, total_writes, error_count,
-        crash_detected, str(_pcap),
+        crash_detected,
     )
 
 
@@ -288,23 +273,24 @@ def _parse_fuzz_output(stdout: str, expected_writes: int) -> tuple[int, int]:
 
 
 def _reopen_dongle(dongle: WhadDongle) -> None:
-    """Re-attach the WhadDevice after a CLI run, with retry."""
-    for attempt in range(3):
+    """Re-attach the WhadDevice, polling every 0.5s up to 6s."""
+    deadline = time.time() + 6.0
+    attempt = 0
+    last_exc: Exception | None = None
+    while time.time() < deadline:
         try:
             dongle.device = WhadDevice.create(config.INTERFACE)
+            if attempt > 0:
+                log.debug(f"[S7] Reopen succeeded after {attempt * 0.5:.1f}s")
             return
         except Exception as exc:
-            if attempt < 2:
-                log.debug(
-                    f"[S7] Reopen attempt {attempt + 1} failed "
-                    f"({type(exc).__name__}: {exc!r}) — retrying in 1s ..."
-                )
-                time.sleep(1.0)
-            else:
-                log.warning(
-                    f"[S7] Could not reopen WHAD device after 3 attempts: "
-                    f"{type(exc).__name__}: {exc!r}"
-                )
+            last_exc = exc
+            attempt += 1
+            time.sleep(0.5)
+    log.warning(
+        f"[S7] Could not reopen WHAD device after 6s "
+        f"({type(last_exc).__name__}: {last_exc!r})"
+    )
 
 
 # ── Finding + summary ────────────────────────────────────────────────────────
@@ -355,7 +341,6 @@ def _assess(
 def _record_finding(
     target: Target,
     engagement_id: str,
-    pcap_path_str: str,
     writable_handles: list[int],
     writes_sent: int,
     total_writes: int,
@@ -382,7 +367,6 @@ def _record_finding(
             "error_count": error_count,
             "crash_detected": crash_detected,
         },
-        pcap_path=pcap_path_str,
         engagement_id=engagement_id,
     )
     insert_finding(finding)
@@ -400,7 +384,6 @@ def _print_summary(
     total_writes: int,
     error_count: int,
     crash_detected: bool,
-    pcap_path_str: str,
 ) -> None:
     severity, _ = _assess(
         writable_handles, writes_sent, total_writes, error_count, crash_detected, target
@@ -418,7 +401,6 @@ def _print_summary(
         f"  Crash detected      : "
         f"{'YES — device disconnected mid-fuzz!' if crash_detected else 'no'}"
     )
-    print(f"  PCAP                : {pcap_path_str}")
     print(f"\n  Severity            : {severity.upper()}")
     if crash_detected:
         print(
