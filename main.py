@@ -49,8 +49,8 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--stages",
-        default="1,2,3,4,5,7",
-        help="Comma-separated list of stages to run (default: 1,2,3,4,5,7)",
+        default="1,2,3,4,5,7,8",
+        help="Comma-separated list of stages to run (default: 1,2,3,4,5,7,8)",
     )
     p.add_argument(
         "--no-gate",
@@ -129,6 +129,8 @@ def main() -> None:
     connections = []
     # addr → writable value_handles found by S5 (used by S7 to skip re-profile)
     gatt_writable: dict[str, list[int]] = {}
+    # addr → full GATT profile from S5 (used by S8 for semantic PoC)
+    gatt_profiles: dict[str, list[dict]] = {}
 
     try:
         if 1 in stages_requested:
@@ -232,9 +234,11 @@ def main() -> None:
                     ):
                         from stages import s5_interact
                         for t in gatt_picks:
-                            handles = s5_interact.run(dongle, t, eng_id)
+                            handles, profile = s5_interact.run(dongle, t, eng_id)
                             if handles:
                                 gatt_writable[t.bd_address] = handles
+                            if profile:
+                                gatt_profiles[t.bd_address] = profile
                 else:
                     log.info("Stage 5 skipped by operator.")
             else:
@@ -313,8 +317,7 @@ def main() -> None:
                 if fuzz_picks:
                     if not config.ACTIVE_GATE or active_gate(
                         7,
-                        f"Will write fuzz payloads to {len(fuzz_picks)} device(s).\n "
-                        "Sends crafted/malformed data and may crash or disrupt targets. "
+                        f"Will write fuzz payloads to {len(fuzz_picks)} device(s). "
                         "Authorized targets only.",
                     ):
                         from stages import s7_fuzz
@@ -327,6 +330,25 @@ def main() -> None:
                     log.info("Stage 7 skipped by operator.")
             else:
                 log.info("Stage 7 skipped: no connectable targets.")
+
+        if 8 in stages_requested and targets:
+            poc_targets = [
+                t for t in targets
+                if t.connectable and t.bd_address in gatt_profiles
+            ]
+            if poc_targets:
+                stage_banner(8, "GATT Semantic PoC / Targeted Interaction", passive=False)
+                if not config.ACTIVE_GATE or active_gate(
+                    8,
+                    f"Will perform targeted GATT writes on {len(poc_targets)} device(s): "
+                    "device rename, alert trigger, proprietary channel probe. "
+                    "Authorized targets only.",
+                ):
+                    from stages import s8_poc
+                    for t in poc_targets:
+                        s8_poc.run(dongle, t, eng_id, gatt_profiles[t.bd_address])
+            else:
+                log.info("Stage 8 skipped: no GATT profiles from S5.")
 
     except KeyboardInterrupt:
         log.info("Run aborted by user.")

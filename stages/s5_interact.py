@@ -67,8 +67,10 @@ NOTIFY_HARVEST_SECS = 15   # max wall-clock time to listen for notifications
 NOTIFY_SILENCE_SECS = 4    # exit early after this many seconds with no new notifications
 
 
-def run(dongle: WhadDongle, target: Target, engagement_id: str) -> list[int]:
-    """Returns list of writable value_handles found (for S5→S7 handoff)."""
+def run(
+    dongle: WhadDongle, target: Target, engagement_id: str
+) -> tuple[list[int], list[dict]]:
+    """Returns (writable_handles, full_profile) for S5→S7/S8 handoff."""
     if _cli_available():
         return _run_cli(dongle, target, engagement_id)
     return _run_python_api(dongle, target, engagement_id)
@@ -85,7 +87,7 @@ def _cli_available() -> bool:
     )
 
 
-def _run_cli(dongle: WhadDongle, target: Target, engagement_id: str) -> list[int]:
+def _run_cli(dongle: WhadDongle, target: Target, engagement_id: str) -> tuple[list[int], list[dict]]:
     addr = target.bd_address
     is_random = target.address_type != "public"
     rand_flag = "-r" if is_random else ""
@@ -134,7 +136,7 @@ def _run_cli(dongle: WhadDongle, target: Target, engagement_id: str) -> list[int
             f"[CLI] No profile output for {addr} "
             f"(exit={returncode}): {stderr.strip()[:120]}"
         )
-        return []
+        return [], []
 
     log.debug(f"[CLI] Raw profile stdout for {addr}: {stdout[:500]!r}")
 
@@ -144,15 +146,20 @@ def _run_cli(dongle: WhadDongle, target: Target, engagement_id: str) -> list[int
 
     if not chars:
         log.info(f"[CLI] No characteristics parsed on {addr} — check debug log for raw output.")
-        return []
+        return [], []
+
+    profile = [_char_to_dict(c) for c in chars]
 
     if not unauth_readable and not unauth_writable:
         log.info(
             f"[CLI] {addr}: {len(chars)} characteristic(s) found, "
             "all require authentication — no finding."
         )
-        return [c.value_handle for c in chars
-                if "write" in c.properties or "write_no_resp" in c.properties]
+        return (
+            [c.value_handle for c in chars
+             if "write" in c.properties or "write_no_resp" in c.properties],
+            profile,
+        )
 
     _record_finding(
         addr, target, engagement_id,
@@ -161,7 +168,7 @@ def _run_cli(dongle: WhadDongle, target: Target, engagement_id: str) -> list[int
     _print_summary(
         addr, target, chars, unauth_readable, unauth_writable, device_info,
     )
-    return [c.value_handle for c in unauth_writable]
+    return [c.value_handle for c in unauth_writable], profile
 
 
 def _reopen_dongle(dongle: WhadDongle) -> None:
@@ -326,7 +333,7 @@ def _extract_props_from_rights(prefix: str) -> list[str]:
 # Python API fallback
 # ---------------------------------------------------------------------------
 
-def _run_python_api(dongle: WhadDongle, target: Target, engagement_id: str) -> list[int]:
+def _run_python_api(dongle: WhadDongle, target: Target, engagement_id: str) -> tuple[list[int], list[dict]]:
     addr = target.bd_address
     is_random = target.address_type != "public"
 
@@ -349,16 +356,16 @@ def _run_python_api(dongle: WhadDongle, target: Target, engagement_id: str) -> l
     except ConnectionLostException:
         log.warning(f"Connection to {addr} lost during setup.")
         detach_monitor(_monitor)
-        return
+        return [], []
     except Exception as exc:
         log.error(f"Failed to connect to {addr}: {type(exc).__name__}: {exc}")
         detach_monitor(_monitor)
-        return
+        return [], []
 
     if periph_dev is None:
         log.warning(f"Could not connect to {addr} (timeout).")
         detach_monitor(_monitor)
-        return
+        return [], []
 
     log.info(f"Connected to {addr}. Discovering GATT profile...")
 
@@ -367,7 +374,7 @@ def _run_python_api(dongle: WhadDongle, target: Target, engagement_id: str) -> l
             periph_dev.disconnect()
         except Exception:
             pass
-        return
+        return [], []
 
     log.info("Enumerating characteristics...")
 
@@ -465,15 +472,20 @@ def _run_python_api(dongle: WhadDongle, target: Target, engagement_id: str) -> l
 
     if not chars:
         log.info(f"No characteristics discovered on {addr}.")
-        return []
+        return [], []
+
+    profile = [_char_to_dict(c) for c in chars]
 
     if not unauth_readable and not unauth_writable:
         log.info(
             f"{addr}: {len(chars)} characteristic(s) found, "
             "all require authentication — no finding."
         )
-        return [c.value_handle for c in chars
-                if "write" in c.properties or "write_no_resp" in c.properties]
+        return (
+            [c.value_handle for c in chars
+             if "write" in c.properties or "write_no_resp" in c.properties],
+            profile,
+        )
 
     _record_finding(
         addr, target, engagement_id,
@@ -484,7 +496,7 @@ def _run_python_api(dongle: WhadDongle, target: Target, engagement_id: str) -> l
         addr, target, chars, unauth_readable, unauth_writable, device_info,
         notifications,
     )
-    return [c.value_handle for c in unauth_writable]
+    return [c.value_handle for c in unauth_writable], profile
 
 
 def _harvest_notifications(
@@ -612,6 +624,19 @@ def _discover_with_timeout(periph_dev, addr: str) -> bool:
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
+
+def _char_to_dict(c: GattCharacteristic) -> dict:
+    return {
+        "uuid": c.uuid,
+        "uuid_name": UUID_NAMES.get(_uuid_to_int(c.uuid), ""),
+        "handle": c.handle,
+        "value_handle": c.value_handle,
+        "properties": c.properties,
+        "requires_auth": c.requires_auth,
+        "value_text": c.value_text,
+        "value_hex": c.value_hex,
+    }
+
 
 def _decode_char_value(gc: GattCharacteristic, raw: str | bytes) -> None:
     """

@@ -133,10 +133,17 @@ def select_targets(
             print("  [Enter] = all")
 
     while True:
-        raw = input("  Selection: ").strip().lower()
+        _inp = input("  Selection: ").lower()
+        # Strip non-printable/control chars that some terminals inject
+        # (escape sequences, null bytes, etc.) to prevent false comparison misses
+        raw = "".join(c for c in _inp if c.isalnum() or c in " ,").strip()
 
         if raw == "" and default_all and not single_pick:
             return sorted_targets
+
+        if raw == "":
+            # Silently re-prompt on empty input (accidental Enter / buffered newline)
+            continue
 
         if raw == "skip":
             return []
@@ -148,10 +155,10 @@ def select_targets(
             ]
             if not filtered:
                 print(
-                    f"  No targets remain after smart filter "
-                    f"(all are {', '.join(sorted(smart_skip_classes))})."
+                    f"  No non-{'/'.join(sorted(smart_skip_classes))} targets found — "
+                    "skipping stage."
                 )
-                continue
+                return []
             if single_pick:
                 chosen = filtered[0]
                 print(
