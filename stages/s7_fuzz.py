@@ -418,28 +418,33 @@ def _print_summary(
     severity, _ = _assess(
         writable_handles, writes_sent, total_writes, error_count, crash_detected, target
     )
-    print("\n" + "-" * 72)
+    if writable_handles:
+        handles_str = str(writable_handles[:8])
+        if len(writable_handles) > 8:
+            handles_str = handles_str[:-1] + f", +{len(writable_handles) - 8} more]"
+    else:
+        handles_str = "none"
+
+    print("\n" + "─" * 76)
     print("  STAGE 7 SUMMARY -- GATT Write Fuzzer (CLI)")
-    print("-" * 72)
-    print(f"  Target              : {target.bd_address}")
-    print(f"  Name                : {target.name or '(unnamed)'}")
-    print(f"  Device class        : {target.device_class}")
-    print(f"  Writable handles    : {writable_handles or 'none'}")
-    print(f"  Writes sent / total : {writes_sent} / {total_writes}")
-    print(f"  Error responses     : {error_count}")
-    print(
-        f"  Crash detected      : "
-        f"{'YES — device disconnected mid-fuzz!' if crash_detected else 'no'}"
-    )
-    print(f"\n  Severity            : {severity.upper()}")
+    print("─" * 76)
+    print(f"  {'Target':<18}: {target.bd_address}")
+    print(f"  {'Name':<18}: {target.name or '(unnamed)'}")
+    print(f"  {'Device class':<18}: {target.device_class}")
+    print(f"  {'Writable handles':<18}: {handles_str}")
+    print(f"  {'Writes / total':<18}: {writes_sent} / {total_writes}")
+    print(f"  {'Error responses':<18}: {error_count}")
+    crash_val = "YES — disconnected mid-fuzz" if crash_detected else "no"
+    print(f"  {'Crash detected':<18}: {crash_val}")
+    print(f"\n  {'Severity':<18}: {severity.upper()}")
     if crash_detected:
         print(
-            "  Why                 : Disconnect under fuzz — buffer overflow\n"
-            "                        or unhandled exception in BLE GATT stack."
+            "  Why               : Disconnect under fuzz — buffer overflow\n"
+            "                      or unhandled exception in BLE GATT stack."
         )
     elif error_count == 0 and writes_sent > 0:
         print(
-            "  Why                 : All payloads accepted including 200-512 byte\n"
-            "                        writes — missing ATT payload length validation."
+            "  Why               : All payloads accepted including 200-512 byte\n"
+            "                      writes — missing ATT payload length validation."
         )
-    print("-" * 72 + "\n")
+    print("─" * 76 + "\n")

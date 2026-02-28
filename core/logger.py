@@ -38,9 +38,10 @@ def active_gate(stage: int, description: str) -> bool:
     Blocks execution until analyst explicitly approves an active stage.
     Returns True to proceed, False to skip.
     """
+    print(f"\n{'--^----' * 10}")
     print(f"  ACTIVE STAGE {stage} GATE")
     print(f"  {description}")
-    print(f"\n{'--^----' * 10}")
+    print(f"{'------^' * 10}")
     print("\n  This stage will transmit RF packets.")
     print("  Only proceed on equipment you own or have written authorization to test.\n")
     while True:
@@ -108,10 +109,11 @@ def select_targets(
     )
     print("  " + "─" * 72)
     for i, t in enumerate(sorted_targets, 1):
+        name = (t.name or "—")[:28]
         print(
             f"  {i:<4} {_risk_label(t.risk_score):<5} "
             f"{t.bd_address:<20} {t.device_class:<14} "
-            f"{t.rssi_avg:>4.0f}  {t.name or '—'}"
+            f"{t.rssi_avg:>4.0f}  {name}"
         )
     print()
 

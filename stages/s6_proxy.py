@@ -367,19 +367,24 @@ def _print_summary(
         else "high" if connections_accepted
         else "medium"
     )
-    print("\n" + "-" * 72)
+    import os as _os
+    pcap_display = pcap_path_str
+    if len(pcap_display) > 52:
+        pcap_display = "…" + pcap_path_str[-51:]
+
+    print("\n" + "─" * 76)
     print("  STAGE 6 SUMMARY -- MITM Proxy")
-    print("-" * 72)
-    print(f"  Target              : {target.bd_address}")
-    print(f"  Name                : {target.name or '(unnamed)'}")
-    print(f"  Device class        : {target.device_class}")
-    print(f"  Attack interface    : {config.INTERFACE}")
-    print(f"  Proxy interface     : {config.PROXY_INTERFACE}")
-    print(f"  PCAP                : {pcap_path_str}")
-    print(f"  Connections accepted: {'yes' if connections_accepted else 'no'}")
-    print(f"  Data intercepted    : {'yes' if data_intercepted else 'no'}")
-    print(f"  Severity            : {severity.upper()}")
+    print("─" * 76)
+    print(f"  {'Target':<18}: {target.bd_address}")
+    print(f"  {'Name':<18}: {target.name or '(unnamed)'}")
+    print(f"  {'Device class':<18}: {target.device_class}")
+    print(f"  {'Attack interface':<18}: {config.INTERFACE}")
+    print(f"  {'Proxy interface':<18}: {config.PROXY_INTERFACE}")
+    print(f"  {'PCAP':<18}: {pcap_display}")
+    print(f"  {'Conn accepted':<18}: {'yes' if connections_accepted else 'no'}")
+    print(f"  {'Data intercepted':<18}: {'yes' if data_intercepted else 'no'}")
+    print(f"  {'Severity':<18}: {severity.upper()}")
     print(f"\n  Analyze captured traffic:")
     print(f"    wireshark {pcap_path_str}")
     print(f"    tshark -r {pcap_path_str} -Y btle")
-    print("-" * 72 + "\n")
+    print("─" * 76 + "\n")

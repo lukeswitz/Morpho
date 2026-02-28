@@ -151,10 +151,10 @@ def _start_adv_jam(connector, target_addr: str) -> None:
 def _print_summary(
     target_addr: str, jam_mode: str, duration: int
 ) -> None:
-    print("\n" + "-" * 72)
+    print("\n" + "─" * 76)
     print("  STAGE 4 SUMMARY -- Reactive Jamming PoC")
-    print("-" * 72)
-    print(f"  Target          : {target_addr}")
-    print(f"  Mode            : {jam_mode}")
-    print(f"  Duration        : {duration}s")
-    print("-" * 72 + "\n")
+    print("─" * 76)
+    print(f"  {'Target':<18}: {target_addr}")
+    print(f"  {'Mode':<18}: {jam_mode}")
+    print(f"  {'Duration':<18}: {duration}s")
+    print("─" * 76 + "\n")

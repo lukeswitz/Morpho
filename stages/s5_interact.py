@@ -829,34 +829,37 @@ def _print_summary(
     device_info: dict[str, str],
     notifications: list[dict] | None = None,
 ) -> None:
-    print("\n" + "-" * 72)
+    print("\n" + "─" * 76)
     print("  STAGE 5 SUMMARY -- GATT Enumeration")
-    print("-" * 72)
-    print(f"  Target          : {addr}")
-    print(f"  Name            : {target.name or '(unnamed)'}")
-    print(f"  Manufacturer    : {target.manufacturer or '—'}")
-    print(f"  Device class    : {target.device_class}")
-    print(f"  Total chars     : {len(chars)}")
-    print(f"  Unauth readable : {len(readable)}")
-    print(f"  Unauth writable : {len(writable)}")
+    print("─" * 76)
+    print(f"  {'Target':<18}: {addr}")
+    print(f"  {'Name':<18}: {target.name or '(unnamed)'}")
+    print(f"  {'Manufacturer':<18}: {target.manufacturer or '—'}")
+    print(f"  {'Device class':<18}: {target.device_class}")
+    print(f"  {'Total chars':<18}: {len(chars)}")
+    print(f"  {'Unauth readable':<18}: {len(readable)}")
+    print(f"  {'Unauth writable':<18}: {len(writable)}")
 
     if device_info:
         print("\n  Device Information:")
         for k, v in device_info.items():
-            print(f"    {k:<30}: {v}")
+            v_str = str(v)
+            if len(v_str) > 44:
+                v_str = v_str[:43] + "…"
+            print(f"    {k:<20}: {v_str}")
 
     if readable:
         print(f"\n  Readable without authentication ({len(readable)}):")
         for c in readable[:20]:
-            label = _uuid_label(c.uuid)
+            label = _uuid_label(c.uuid)[:30]
             val = c.value_text or (
-                f"<hex:{c.value_hex[:32]}{'…' if c.value_hex and len(c.value_hex) > 32 else ''}>"
+                f"<hex:{c.value_hex[:24]}{'…' if c.value_hex and len(c.value_hex) > 24 else ''}>"
                 if c.value_hex
                 else "—"
             )
-            if len(val) > 50:
-                val = val[:50] + "…"
-            print(f"    h={c.value_handle:<4}  {label:<40}  {val}")
+            if len(val) > 32:
+                val = val[:31] + "…"
+            print(f"    h={c.value_handle:<4}  {label:<30}  {val}")
         if len(readable) > 20:
             print(f"    … and {len(readable) - 20} more")
 
@@ -870,29 +873,31 @@ def _print_summary(
         seen: set[str] = set()
         for n in notifications[:20]:
             key = f"{n['uuid']}:{n['value_hex']}"
-            label = _uuid_label(n["uuid"])
-            val = n["value_text"] or f"<hex:{n['value_hex'][:32]}>"
+            label = _uuid_label(n["uuid"])[:30]
+            val = n["value_text"] or f"<hex:{n['value_hex'][:24]}>"
+            if len(val) > 28:
+                val = val[:27] + "…"
             dedup_mark = " [dup]" if key in seen else ""
             seen.add(key)
-            print(f"    {n['ts'][11:19]}  {label:<40}  {val}{dedup_mark}")
+            print(f"    {n['ts'][11:19]}  {label:<30}  {val}{dedup_mark}")
         if len(notifications) > 20:
             print(f"    … and {len(notifications) - 20} more")
 
     severity = _compute_severity(readable, writable, target)
-    print(f"\n  Severity        : {severity.upper()}")
+    print(f"\n  {'Severity':<18}: {severity.upper()}")
     if writable:
         print(
-            "  Why             : Writable characteristics without auth allow any\n"
-            "                    nearby BLE device to modify state/config/behaviour."
+            "  Why               : Writable characteristics without auth allow\n"
+            "                      any nearby device to modify state/config."
         )
     elif len(readable) > 3:
         print(
-            "  Why             : Multiple characteristics expose device data\n"
-            "                    without pairing — enables fingerprinting."
+            "  Why               : Multiple characteristics expose device data\n"
+            "                      without pairing — enables fingerprinting."
         )
     if notifications:
         print(
-            "  Notifications   : Device actively broadcasts data — confirms real-time\n"
-            "                    data leakage over BLE without authentication."
+            "  Notifications     : Device broadcasts data without auth —\n"
+            "                      confirms real-time BLE data leakage."
         )
-    print("-" * 72 + "\n")
+    print("─" * 76 + "\n")

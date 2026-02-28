@@ -70,10 +70,16 @@ def _parse_args() -> argparse.Namespace:
         default=config.PROXY_INTERFACE,
         help=f"Second interface for Stage 6 wble-proxy (default: {config.PROXY_INTERFACE})",
     )
+    p.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable DEBUG-level logging",
+    )
     return p.parse_args()
 
 
 def _apply_args(args: argparse.Namespace) -> None:
+    import logging as _logging
     config.INTERFACE = args.interface
     config.SCAN_DURATION = args.scan_duration
     if args.no_gate:
@@ -81,6 +87,14 @@ def _apply_args(args: argparse.Namespace) -> None:
     if args.targets:
         config.TARGET_FILTER = [a.upper() for a in args.targets]
     config.PROXY_INTERFACE = args.proxy_interface
+    if args.debug:
+        # Lower all already-created named loggers (created at import time)
+        for logger in _logging.Logger.manager.loggerDict.values():
+            if isinstance(logger, _logging.Logger):
+                logger.setLevel(_logging.DEBUG)
+                for h in logger.handlers:
+                    h.setLevel(_logging.DEBUG)
+        _logging.root.setLevel(_logging.DEBUG)
 
 
 def _banner(eng_id: str, name: str, location: str) -> None:
@@ -293,9 +307,10 @@ def main() -> None:
                         )
                         for t in s5_fuzz_targets:
                             h = gatt_writable[t.bd_address]
+                            name = (t.name or "—")[:20]
                             print(
                                 f"    {t.bd_address:<20}  "
-                                f"{t.name or '—':<20}  "
+                                f"{name:<20}  "
                                 f"handles={h}"
                             )
                         fuzz_picks = s5_fuzz_targets
@@ -332,9 +347,13 @@ def main() -> None:
                 log.info("Stage 7 skipped: no connectable targets.")
 
         if 8 in stages_requested and targets:
+            # S5 full profiles take priority; S7-only targets get self-profiled in S8.
             poc_targets = [
                 t for t in targets
-                if t.connectable and t.bd_address in gatt_profiles
+                if t.connectable and (
+                    t.bd_address in gatt_profiles
+                    or t.bd_address in gatt_writable
+                )
             ]
             if poc_targets:
                 stage_banner(8, "GATT Semantic PoC / Targeted Interaction", passive=False)
@@ -346,9 +365,12 @@ def main() -> None:
                 ):
                     from stages import s8_poc
                     for t in poc_targets:
-                        s8_poc.run(dongle, t, eng_id, gatt_profiles[t.bd_address])
+                        s8_poc.run(
+                            dongle, t, eng_id,
+                            gatt_profiles.get(t.bd_address, []),
+                        )
             else:
-                log.info("Stage 8 skipped: no GATT profiles from S5.")
+                log.info("Stage 8 skipped: no writable targets identified by S5 or S7.")
 
     except KeyboardInterrupt:
         log.info("Run aborted by user.")
@@ -396,13 +418,19 @@ def _emit_summary(eng_id: str) -> None:
 
     if findings:
         print("\n  Finding details:")
-        for f in sorted(findings, key=lambda x: ("critical","high","medium","low","info").index(x["severity"])):
+        for f in sorted(
+            findings,
+            key=lambda x: ("critical", "high", "medium", "low", "info").index(
+                x["severity"]
+            ),
+        ):
             desc = f.get("description", "")
-            short = desc[:80] + "…" if len(desc) > 80 else desc
+            short = desc[:72] + "…" if len(desc) > 72 else desc
+            ftype = f["type"][:16]
             print(
                 f"    [{f['severity'].upper():<8}]  "
                 f"{f['target_addr']:<20}  "
-                f"{f['type']:<16}  "
+                f"{ftype:<16}  "
                 f"{short}"
             )
 

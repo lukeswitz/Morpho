@@ -198,18 +198,15 @@ def _build_adv_data(target: Target) -> bytes:
 def _print_summary(
     target: Target, connections: list[dict]
 ) -> None:
-    print("\n" + "-" * 72)
+    print("\n" + "─" * 76)
     print("  STAGE 3 SUMMARY -- Identity Clone")
-    print("-" * 72)
-    print(f"  Cloned device   : {target.bd_address}")
-    print(f"  Device name     : {target.name or '(unnamed)'}")
-    print(f"  Device class    : {target.device_class}")
-    print(f"  Clone duration  : {CLONE_DURATION}s")
-    print(f"  Centrals duped  : {len(connections)}")
+    print("─" * 76)
+    print(f"  {'Cloned device':<18}: {target.bd_address}")
+    print(f"  {'Device name':<18}: {target.name or '(unnamed)'}")
+    print(f"  {'Device class':<18}: {target.device_class}")
+    print(f"  {'Clone duration':<18}: {CLONE_DURATION}s")
+    print(f"  {'Centrals duped':<18}: {len(connections)}")
     if connections:
         for i, c in enumerate(connections):
-            print(
-                f"    [{i + 1}] handle={c['conn_handle']}  "
-                f"at {c['timestamp']}"
-            )
-    print("-" * 72 + "\n")
+            print(f"    [{i + 1}] handle={c['conn_handle']}  at {c['timestamp']}")
+    print("─" * 76 + "\n")

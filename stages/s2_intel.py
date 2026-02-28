@@ -416,36 +416,32 @@ def _print_summary(connections: list[Connection]) -> None:
     from core.db import get_targets
     
     if not connections:
-        print("\n" + "-" * 80)
-        print(f"  STAGE 2 SUMMARY -- 0 connections captured")
-        print("-" * 80)
+        print("\n" + "─" * 76)
+        print("  STAGE 2 SUMMARY -- 0 connections captured")
+        print("─" * 76)
         print("  No CONNECT_IND PDUs observed during sniff window.")
-        print("-" * 80)
+        print("─" * 76)
         return
-    
+
     eng_id = connections[0].engagement_id
     targets_db = get_targets(eng_id)
     targets_by_addr = {
         t["bd_address"]: t["name"]
         for t in targets_db
     }
-    
-    print("\n" + "-" * 90)
-    print(f"  STAGE 2 SUMMARY -- {len(connections)} connections captured")
-    print("-" * 90)
-    print(
-        f"  {'CENTRAL':<20} {'PERIPHERAL':<20} "
-        f"{'AA':>10}  ENC  LEGACY  PLAIN  NAME"
-    )
-    print("-" * 90)
+
+    print("\n" + "─" * 80)
+    print(f"  STAGE 2 SUMMARY -- {len(connections)} connection(s) captured")
+    print("─" * 80)
+    print(f"  {'CENTRAL':<20} {'PERIPHERAL':<20} {'ACCESS ADDR':<10}  E L P  DEVICE NAME")
+    print("─" * 80)
     for c in connections:
-        periph_name = targets_by_addr.get(c.peripheral_addr) or "—"
+        periph_name = (targets_by_addr.get(c.peripheral_addr) or "—")[:14]
+        enc  = "Y" if c.encrypted else "N"
+        lgcy = "Y" if c.legacy_pairing_observed else "N"
+        pln  = "Y" if c.plaintext_data_captured else "N"
         print(
             f"  {c.central_addr:<20} {c.peripheral_addr:<20} "
-            f"0x{c.access_address:08X}  "
-            f"{'Y' if c.encrypted else 'N':>3}  "
-            f"{'Y' if c.legacy_pairing_observed else 'N':>6}  "
-            f"{'Y' if c.plaintext_data_captured else 'N':>5}  "
-            f"{periph_name}"
+            f"0x{c.access_address:08X}  {enc} {lgcy} {pln}  {periph_name}"
         )
-    print("-" * 90 + "\n")
+    print("─" * 80 + "\n")

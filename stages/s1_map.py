@@ -337,6 +337,21 @@ def _sanitize_string(s: str | None) -> str | None:
     return clean if clean else None
 
 
+def _trunc(s: str | None, n: int) -> str:
+    val = s or '—'
+    return val[:n] if len(val) > n else val
+
+
+def _addr_type_short(addr_type: str) -> str:
+    return {
+        "public": "public",
+        "random_static": "rand:static",
+        "random_non_resolvable": "rand:non-res",
+        "random_resolvable": "rand:res",
+        "random": "random",
+    }.get(addr_type, addr_type[:14])
+
+
 def _risk_label(score: int) -> str:
     if score >= 8:
         return "CRIT"
@@ -357,20 +372,20 @@ def _print_summary(targets: list[Target]) -> None:
     print("─" * 130)
     print(
         f"  {'RISK':<6} {'BD ADDRESS':<20} {'TYPE':<14} "
-        f"{'PDU':<16} {'CONN':<5} {'CH':<4} {'RSSI':>6}  NAME                      MANUFACTURER"
+        f"{'PDU':<16} {'CONN':<5} {'CH':<4} {'RSSI':>5}  {'NAME':<24} MANUFACTURER"
     )
     print("─" * 130)
     for t in targets:
         print(
             f"  {_risk_label(t.risk_score):<6} "
             f"{t.bd_address:<20} "
-            f"{t.device_class:<14} "
+            f"{_addr_type_short(t.address_type):<14} "
             f"{t.adv_type:<16} "
             f"{'yes' if t.connectable else 'no':<5} "
             f"{t.channel:<4} "
             f"{t.rssi_avg:>5.0f}  "
-            f"{(t.name or '—'):<25} "
-            f"{t.manufacturer or '—'}"
+            f"{_trunc(t.name, 24):<24} "
+            f"{_trunc(t.manufacturer, 22)}"
         )
     print("─" * 130)
 
