@@ -1,4 +1,5 @@
 import argparse
+import shutil
 import sys
 import time
 import uuid
@@ -425,14 +426,15 @@ def _emit_summary(eng_id: str) -> None:
             ),
         ):
             desc = f.get("description", "")
-            short = desc[:72] + "…" if len(desc) > 72 else desc
             ftype = f["type"][:16]
-            print(
-                f"    [{f['severity'].upper():<8}]  "
-                f"{f['target_addr']:<20}  "
-                f"{ftype:<16}  "
-                f"{short}"
-            )
+            prefix = f"    [{f['severity'].upper():<8}]  {f['target_addr']:<20}  {ftype:<16}  "
+            term_width = shutil.get_terminal_size(fallback=(120, 24)).columns
+            desc_width = max(40, term_width - len(prefix))
+            if len(desc) > desc_width:
+                lines = [desc[i:i + desc_width] for i in range(0, len(desc), desc_width)]
+                print(prefix + ("\n" + " " * len(prefix)).join(lines))
+            else:
+                print(prefix + desc)
 
     print(f"\n  Database: {config.DB_PATH}")
     print("=" * 60 + "\n")
