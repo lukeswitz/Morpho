@@ -145,11 +145,11 @@ newgrp dialout
 ## Usage
 
 ```bash
-# Full pipeline (Stages 1-5)
-python main.py -n "Engagement1" -l "Location" --scan-duration 120
+# Full pipeline (Stages 1-8)
+python main.py -n "Engagement1" -l "Location" --scan-duration 60
 
 # Specific stages only
-python main.py -n "Scan Only" -l "Lab" --stages 1,2,5
+python main.py -n "Scan Only" -l "Lab" --stages 1,5,7,8
 
 # Single target device
 python main.py -n "Target" -l "Lab" --target AA:BB:CC:DD:EE:FF
