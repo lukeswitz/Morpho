@@ -15,6 +15,7 @@ import threading
 from datetime import datetime, timezone
 
 from whad.ble.exceptions import ConnectionLostException
+from whad.device import WhadDevice
 
 from core.dongle import WhadDongle
 from core.models import Target, Finding, GattCharacteristic
@@ -95,6 +96,8 @@ def _run_cli(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
 
     # Release the WHAD device so wble-connect can open it.
     dongle.device.close()
+    import time as _time
+    _time.sleep(0.5)   # let OS/firmware release the port before CLI opens it
 
     cmd = (
         f"wble-connect -i {config.INTERFACE} {rand_flag} {addr} "
@@ -151,12 +154,24 @@ def _run_cli(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
 
 
 def _reopen_dongle(dongle: WhadDongle) -> None:
-    """Re-attach the underlying WhadDevice after a CLI run."""
-    try:
-        from whad.device import WhadDevice
-        dongle.device = WhadDevice.create(config.INTERFACE)
-    except Exception as exc:
-        log.warning(f"Could not reopen WHAD device: {exc}")
+    """Re-attach the underlying WhadDevice after a CLI run, with retry."""
+    import time as _time
+    for attempt in range(3):
+        try:
+            dongle.device = WhadDevice.create(config.INTERFACE)
+            return
+        except Exception as exc:
+            if attempt < 2:
+                log.debug(
+                    f"Reopen attempt {attempt + 1} failed "
+                    f"({type(exc).__name__}: {exc!r}) — retrying in 1s ..."
+                )
+                _time.sleep(1.0)
+            else:
+                log.warning(
+                    f"Could not reopen WHAD device after 3 attempts: "
+                    f"{type(exc).__name__}: {exc!r}"
+                )
 
 
 def _parse_cli_profile(

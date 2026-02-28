@@ -1,5 +1,6 @@
 import argparse
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -227,7 +228,9 @@ def main() -> None:
                         "and enumerate GATT profiles.",
                     ):
                         from stages import s5_interact
-                        for t in gatt_picks:
+                        for idx, t in enumerate(gatt_picks):
+                            if idx > 0:
+                                time.sleep(3.0)  # settle between back-to-back connections
                             s5_interact.run(dongle, t, eng_id)
                 else:
                     log.info("Stage 5 skipped by operator.")
@@ -264,6 +267,31 @@ def main() -> None:
                     log.info("Stage 6 skipped by operator.")
             else:
                 log.info("Stage 6 skipped: no connectable targets.")
+
+        if 7 in stages_requested and targets:
+            connectable = [t for t in targets if t.connectable]
+            if connectable:
+                stage_banner(7, "GATT Write Fuzzer", passive=False)
+                fuzz_picks = select_targets(
+                    connectable,
+                    prompt="Stage 7 — Select targets for GATT write fuzzing",
+                    default_all=False,
+                    smart_skip_classes={"it_gear"},
+                )
+                if fuzz_picks:
+                    if not config.ACTIVE_GATE or active_gate(
+                        7,
+                        f"Will write fuzz payloads to {len(fuzz_picks)} device(s). "
+                        "Sends crafted/malformed data and may crash or disrupt targets. "
+                        "Authorized targets only.",
+                    ):
+                        from stages import s7_fuzz
+                        for t in fuzz_picks:
+                            s7_fuzz.run(dongle, t, eng_id)
+                else:
+                    log.info("Stage 7 skipped by operator.")
+            else:
+                log.info("Stage 7 skipped: no connectable targets.")
 
     except KeyboardInterrupt:
         log.info("Run aborted by user.")

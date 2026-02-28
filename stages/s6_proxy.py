@@ -16,6 +16,7 @@ Mirrors Stage 5's dongle lifecycle: close WhadDevice before CLI, reopen after.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 
@@ -53,7 +54,7 @@ def run(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
         f" -i {config.INTERFACE}"
         f" -p {config.PROXY_INTERFACE}"
         f" {rand_flag}"
-        f" --output {_monitor['pcap_path']}"
+        f" --output {_pcap}"
         f" {addr}"
     )
 
@@ -64,6 +65,8 @@ def run(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
     log.debug(f"[S6] Command: {cmd}")
 
     dongle.device.close()
+    import time as _time
+    _time.sleep(0.5)   # let OS/firmware release the port before CLI opens it
 
     stdout = ""
     stderr = ""
@@ -125,48 +128,140 @@ def _prereqs_ok(target: Target) -> bool:
         )
         return False
 
-    if not _proxy_interface_accessible(config.PROXY_INTERFACE):
+    return _select_proxy_interface()
+
+
+def _select_proxy_interface() -> bool:
+    """Discover available proxy interfaces and prompt operator to select one.
+
+    Queries whadup for WHAD-native devices and hciconfig for HCI adapters.
+    Excludes the attack interface already in use (config.INTERFACE).
+    Auto-selects if exactly one candidate; prompts when multiple are available.
+    Updates config.PROXY_INTERFACE to the chosen interface.
+
+    Returns True when a valid interface is confirmed, False to skip Stage 6.
+    """
+    candidates = _discover_interfaces()
+    candidates = [(n, d) for n, d in candidates if n != config.INTERFACE]
+
+    if not candidates:
         log.error(
-            f"[S6] Proxy interface '{config.PROXY_INTERFACE}' is not accessible. "
-            f"Check with: hciconfig {config.PROXY_INTERFACE} up  "
-            "Or use --proxy-interface to specify a different interface."
+            "[S6] No proxy interface available. "
+            f"Attack interface ({config.INTERFACE}) is already in use. "
+            "Connect a second BLE adapter (built-in Bluetooth or a second dongle). "
+            "List connected WHAD devices with: whadup"
         )
         return False
 
-    return True
+    current = config.PROXY_INTERFACE
 
+    if len(candidates) == 1:
+        name, display = candidates[0]
+        if name != current:
+            log.info(f"[S6] Auto-selected proxy interface: {display}")
+            config.PROXY_INTERFACE = name
+        else:
+            log.info(f"[S6] Proxy interface confirmed: {display}")
+        return True
 
-def _proxy_interface_accessible(iface: str) -> bool:
-    """Return True if the proxy interface appears usable.
+    # Multiple candidates — prompt operator to choose
+    print("\n  Stage 6 — Select proxy interface (second RF adapter):")
+    print(f"  (Attack interface in use: {config.INTERFACE})\n")
+    for i, (name, display) in enumerate(candidates, 1):
+        marker = "  <-- current default" if name == current else ""
+        print(f"  [{i}] {display}{marker}")
+    print("  [s] Skip Stage 6\n")
 
-    Lightweight check only — actual errors surface in the subprocess.
-    Optimistic pass for unknown interface types.
-    """
-    if iface.startswith("hci"):
+    while True:
         try:
-            result = subprocess.run(
-                ["hciconfig", iface],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            return result.returncode == 0
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            # hciconfig not available (e.g. macOS without bluez) — optimistic pass
-            return True
+            raw = input("  Select [1-N/s]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return False
+        if raw == "s":
+            log.info("[S6] Stage 6 skipped by operator (no interface selected).")
+            return False
+        try:
+            idx = int(raw) - 1
+            if 0 <= idx < len(candidates):
+                config.PROXY_INTERFACE = candidates[idx][0]
+                log.info(f"[S6] Proxy interface set to: {config.PROXY_INTERFACE}")
+                return True
+        except ValueError:
+            pass
+        print(f"  Please enter 1-{len(candidates)} or 's' to skip.")
 
-    if iface.startswith("uart"):
-        return os.path.exists(f"/dev/{iface}")
 
-    return True   # unknown interface type — optimistic
+def _discover_interfaces() -> list[tuple[str, str]]:
+    """Return list of (whad_name, display_label) for BLE interfaces on this system.
+
+    Queries whadup for WHAD-native devices first (uart*, hci*), then falls back
+    to hciconfig to catch built-in Bluetooth adapters not registered with WHAD.
+    """
+    found: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    # WHAD-native interfaces via whadup (authoritative WHAD device list)
+    try:
+        result = subprocess.run(
+            ["whadup"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("uart") or line.startswith("hci"):
+                parts = line.split()
+                if parts:
+                    name = parts[0]
+                    label = "  ".join(parts)   # e.g. "uart0  UartDevice  /dev/ttyACM0"
+                    if name not in seen:
+                        found.append((name, label))
+                        seen.add(name)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # HCI adapters via hciconfig — catches built-in Bluetooth not listed by whadup
+    try:
+        result = subprocess.run(
+            ["hciconfig"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                m = re.match(r"^(hci\d+)\s*:", line)
+                if m:
+                    name = m.group(1)
+                    if name not in seen:
+                        found.append((name, name))
+                        seen.add(name)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    return found
 
 
 def _reopen_dongle(dongle: WhadDongle) -> None:
-    """Re-attach the underlying WhadDevice after CLI run (mirrors s5_interact)."""
-    try:
-        dongle.device = WhadDevice.create(config.INTERFACE)
-    except Exception as exc:
-        log.warning(f"[S6] Could not reopen WHAD device: {exc}")
+    """Re-attach the underlying WhadDevice after CLI run, with retry."""
+    import time as _time
+    for attempt in range(3):
+        try:
+            dongle.device = WhadDevice.create(config.INTERFACE)
+            return
+        except Exception as exc:
+            if attempt < 2:
+                log.debug(
+                    f"[S6] Reopen attempt {attempt + 1} failed "
+                    f"({type(exc).__name__}: {exc!r}) — retrying in 1s ..."
+                )
+                _time.sleep(1.0)
+            else:
+                log.warning(
+                    f"[S6] Could not reopen WHAD device after 3 attempts: "
+                    f"{type(exc).__name__}: {exc!r}"
+                )
 
 
 def _parse_proxy_output(stdout: str) -> tuple[bool, bool]:
