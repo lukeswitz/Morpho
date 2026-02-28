@@ -346,7 +346,7 @@ def _do_probe(
                 if char_obj is not None:
                     captured_uuid = notify_uuid  # capture for closure
 
-                    def _cb(_characteristic, value, *_):
+                    def _cb(_characteristic, value, *_, **__):
                         hex_val = bytes(value).hex() if isinstance(value, (bytes, bytearray)) else str(value)
                         with lock:
                             notifications.append({

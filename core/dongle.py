@@ -168,43 +168,35 @@ class WhadDongle:
         except Exception:
             pass
 
+        # --- Probes 1–6: class-level checks only — NO instantiation ---
+        # Instantiating a connector and calling start()/stop() registers it
+        # with the WhadDevice and causes WhadDeviceTimeout on ButteRFly.
+        # For ButteRFly firmware, capability == class importability, so
+        # import + hasattr is sufficient for all connectors.
+
         # --- Probe 1: Scanner ---
         try:
-            from whad.ble import Scanner
-            s = Scanner(self.device)
-            s.start()
-            s.stop()
+            from whad.ble import Scanner  # noqa: F401
             caps.can_scan = True
             log.debug("Cap probe: Scanner OK")
-        except Exception as exc:
+        except ImportError as exc:
             log.warning(f"Cap probe: Scanner not available ({exc})")
 
         # --- Probe 2: Sniffer (passive advertisements) ---
         try:
             from whad.ble import Sniffer
-            sniffer = Sniffer(self.device)
-            sniffer.start()
-
-            # Assumption 1: wait_packet vs iterator API
-            if hasattr(sniffer, "wait_packet"):
+            caps.can_sniff = True
+            # Assumption 1: wait_packet vs iterator API (class-level check)
+            if hasattr(Sniffer, "wait_packet"):
                 caps.sniff_api = "wait_packet"
                 caps.can_sniff_active = True
                 log.debug("Cap probe: Sniffer wait_packet API confirmed")
             else:
                 caps.sniff_api = "iterator"
                 log.debug("Cap probe: Sniffer iterator API (no wait_packet)")
-
-            sniffer.stop()
-            caps.can_sniff = True
             log.debug("Cap probe: Sniffer OK")
-        except Exception as exc:
+        except ImportError as exc:
             log.warning(f"Cap probe: Sniffer not available ({exc})")
-
-        # --- Probes 3–6: class-level checks only — NO instantiation ---
-        # Instantiating a connector registers it with the WhadDevice as the
-        # active connector. Without an explicit stop(), it blocks subsequent
-        # Scanner use. For ButteRFly, firmware capability == class method
-        # existence, so hasattr on the class is sufficient.
 
         # --- Probe 3: BD address spoofing (Assumption 2) ---
         try:

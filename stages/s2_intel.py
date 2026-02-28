@@ -31,7 +31,8 @@ def run(
     dongle: WhadDongle,
     targets: list[Target],
     engagement_id: str,
-) -> list[Connection]:
+    print_summary: bool = True,
+) -> tuple[list[Connection], dict[str, list[dict]]]:
     target_addrs = {t.bd_address.upper() for t in targets}
     connections: list[Connection] = []
 
@@ -153,14 +154,33 @@ def run(
         except Exception:
             pass
 
-    _print_summary(connections)
+    if print_summary:
+        _print_summary(connections)
 
     if _s2_pcap is not None and _s2_pcap.exists():
         for conn in connections:
             if conn.legacy_pairing_observed:
                 _crack_pairing_keys(conn, str(_s2_pcap), engagement_id)
 
-    return connections
+    # Extract all available BLE key material from every observed connection
+    if _s2_pcap is not None and _s2_pcap.exists():
+        for conn in connections:
+            _extract_all_keys(conn, str(_s2_pcap), engagement_id)
+
+    # Attempt passive GATT profile recovery from captured traffic
+    passive_gatt: dict[str, list[dict]] = {}
+    if _s2_pcap is not None and _s2_pcap.exists():
+        seen_addrs = {c.peripheral_addr for c in connections}
+        for addr in seen_addrs:
+            profile = _passive_gatt_from_pcap(str(_s2_pcap), addr)
+            if profile:
+                passive_gatt[addr] = profile
+                log.info(
+                    f"[S2] Passive GATT profile recovered for {addr}: "
+                    f"{len(profile)} characteristic(s)"
+                )
+
+    return connections, passive_gatt
 
 
 def _follow_connection(
@@ -410,6 +430,193 @@ def _parse_wanalyze_output(stdout: str) -> dict[str, str]:
     except json.JSONDecodeError as exc:
         log.debug(f"wanalyze non-JSON output: {exc}. Raw: {stdout[:200]}")
         return {}
+
+
+def _run_wanalyze(pcap: str, module: str, timeout: int = 60) -> dict | list | None:
+    """Run wplay --flush <pcap> ble | wanalyze --json <module> and return parsed JSON.
+
+    Returns None on timeout, JSON parse error, or empty output.
+    """
+    cmd = f"wplay --flush {pcap} ble | wanalyze --json {module}"
+    log.debug(f"[S2] wanalyze {module}: {cmd}")
+    try:
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        raw = result.stdout.strip()
+        if not raw:
+            return None
+        log.debug(f"[S2] wanalyze {module} raw: {raw[:300]}")
+        return json.loads(raw)
+    except subprocess.TimeoutExpired:
+        log.warning(f"[S2] wanalyze {module} timed out after {timeout}s.")
+        return None
+    except json.JSONDecodeError as exc:
+        log.debug(f"[S2] wanalyze {module} non-JSON output: {exc}. Raw: {result.stdout[:200]}")
+        return None
+    except Exception as exc:
+        log.error(f"[S2] wanalyze {module} error: {type(exc).__name__}: {exc}")
+        return None
+
+
+_KEY_MODULES: list[tuple[str, str, str, tuple[str, ...]]] = [
+    (
+        "encrypted_session_initialization",
+        "session_keys_extracted",
+        "high",
+        ("skd_master", "skd_slave", "iv_master", "iv_slave"),
+    ),
+    (
+        "ltk_distribution",
+        "ltk_extracted",
+        "critical",
+        ("ltk", "rand", "ediv"),
+    ),
+    (
+        "irk_distribution",
+        "irk_extracted",
+        "high",
+        ("irk", "bd_addr"),
+    ),
+    (
+        "csrk_distribution",
+        "csrk_extracted",
+        "high",
+        ("csrk",),
+    ),
+]
+
+
+def _extract_all_keys(conn: Connection, pcap: str, engagement_id: str) -> None:
+    """Run all wanalyze key-extraction modules against a captured PCAP.
+
+    Creates one Finding per module that yields keys. Gate: wplay/wanalyze in PATH.
+    """
+    if not shutil.which("wplay") or not shutil.which("wanalyze"):
+        return
+
+    for module, finding_type, severity, key_fields in _KEY_MODULES:
+        data = _run_wanalyze(pcap, module)
+        if not isinstance(data, dict):
+            continue
+
+        keys = {k: str(v) for k, v in data.items() if k in key_fields and v}
+        if not keys:
+            log.debug(f"[S2] {module}: no keys in output.")
+            continue
+
+        log.info(f"[S2] {module}: extracted {list(keys.keys())}")
+
+        finding = Finding(
+            type=finding_type,
+            severity=severity,
+            target_addr=conn.peripheral_addr,
+            description=(
+                f"{module.replace('_', ' ').title()} from connection between "
+                f"{conn.central_addr} and {conn.peripheral_addr}. "
+                f"Extracted: {list(keys.keys())}."
+            ),
+            remediation=(
+                "Use LE Secure Connections (LESC) with bonding. "
+                "Legacy key material is derivable from captured traffic. "
+                "Rotate any credentials exchanged over this link."
+            ),
+            evidence={
+                "module": module,
+                "keys": keys,
+                "pcap_path": pcap,
+                "central": conn.central_addr,
+                "peripheral": conn.peripheral_addr,
+            },
+            pcap_path=pcap,
+            engagement_id=engagement_id,
+        )
+        insert_finding(finding)
+        log.info(f"FINDING [{severity}] {finding_type}: {conn.peripheral_addr}")
+
+
+def _passive_gatt_from_pcap(pcap: str, addr: str) -> list[dict]:
+    """Attempt passive GATT profile recovery from a PCAP via wanalyze profile_discovery.
+
+    Returns a list of characteristic dicts in the same format as S5's gatt_profiles,
+    or an empty list if the module produces no results or the format is unrecognised.
+
+    wanalyze profile_discovery JSON schema is not precisely documented — this function
+    handles both a flat list of characteristics and a list of service objects with nested
+    characteristics. DEBUG log shows raw output for first-run verification.
+    """
+    if not shutil.which("wplay") or not shutil.which("wanalyze"):
+        return []
+
+    data = _run_wanalyze(pcap, "profile_discovery")
+    if data is None:
+        return []
+
+    chars: list[dict] = []
+
+    def _make_char(obj: dict) -> dict | None:
+        uuid = str(obj.get("uuid") or obj.get("UUID") or "")
+        if not uuid:
+            return None
+        handle = int(obj.get("handle", 0))
+        value_handle = int(obj.get("value_handle", obj.get("valueHandle", handle)))
+        raw_props = obj.get("properties", obj.get("permissions", obj.get("access", [])))
+        if isinstance(raw_props, str):
+            raw_props = [raw_props]
+        properties = [p.lower().replace("-", "_") for p in raw_props]
+        return {
+            "uuid": uuid.lower(),
+            "uuid_name": "",
+            "handle": handle,
+            "value_handle": value_handle,
+            "properties": properties,
+            "requires_auth": bool(obj.get("requires_auth", False)),
+            "value_text": obj.get("value_text"),
+            "value_hex": obj.get("value_hex") or obj.get("value"),
+        }
+
+    # Handle: flat list of characteristics
+    if isinstance(data, list):
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            # Service object with nested characteristics
+            nested = item.get("characteristics") or item.get("chars") or []
+            if nested:
+                for char_obj in nested:
+                    if isinstance(char_obj, dict):
+                        c = _make_char(char_obj)
+                        if c:
+                            chars.append(c)
+            else:
+                # Flat characteristic object
+                c = _make_char(item)
+                if c:
+                    chars.append(c)
+    elif isinstance(data, dict):
+        # Might be {addr: [...services...]} or {services: [...]}
+        for key in ("characteristics", "chars", "services", addr, addr.lower()):
+            nested = data.get(key)
+            if isinstance(nested, list):
+                for item in nested:
+                    if isinstance(item, dict):
+                        inner = item.get("characteristics") or item.get("chars") or []
+                        if inner:
+                            for char_obj in inner:
+                                c = _make_char(char_obj)
+                                if c:
+                                    chars.append(c)
+                        else:
+                            c = _make_char(item)
+                            if c:
+                                chars.append(c)
+                break
+
+    return chars
 
 
 def _print_summary(connections: list[Connection]) -> None:

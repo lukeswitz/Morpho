@@ -164,7 +164,14 @@ def main() -> None:
                 from stages import s2_intel
 
                 stage_banner(2, "Connection Intelligence", passive=True)
-                connections = s2_intel.run(dongle, connectable, eng_id)
+                connections, s2_gatt = s2_intel.run(dongle, connectable, eng_id)
+                for addr, profile in s2_gatt.items():
+                    if addr not in gatt_profiles:
+                        gatt_profiles[addr] = profile
+                        log.info(
+                            f"[S2] Passive GATT profile available for {addr}: "
+                            f"{len(profile)} char(s)"
+                        )
                 log.info(
                     f"Stage 2 complete: {len(connections)} connections observed"
                 )
@@ -187,7 +194,10 @@ def main() -> None:
                 ):
                     from stages import s3_clone
 
-                    s3_clone.run(dongle, high_value[0], eng_id)
+                    s3_clone.run(
+                        dongle, high_value[0], eng_id,
+                        gatt_profiles.get(high_value[0].bd_address),
+                    )
             else:
                 log.info(
                     "Stage 3 skipped: no high-value connectable targets."
@@ -338,10 +348,12 @@ def main() -> None:
                     ):
                         from stages import s7_fuzz
                         for t in fuzz_picks:
-                            s7_fuzz.run(
+                            found = s7_fuzz.run(
                                 dongle, t, eng_id,
                                 prepped_handles=gatt_writable.get(t.bd_address),
                             )
+                            if found and t.bd_address not in gatt_writable:
+                                gatt_writable[t.bd_address] = found
                 else:
                     log.info("Stage 7 skipped by operator.")
             else:
@@ -373,6 +385,35 @@ def main() -> None:
             else:
                 log.info("Stage 8 skipped: no writable targets identified by S5 or S7.")
 
+        if 9 in stages_requested and targets:
+            connectable = [t for t in targets if t.connectable]
+            if connectable:
+                from stages import s9_inject
+
+                stage_banner(9, "Packet Injection / Replay", passive=False)
+                inject_picks = select_targets(
+                    connectable,
+                    prompt="Stage 9 — Select target for injection",
+                    default_all=False,
+                    max_count=1,
+                )
+                if inject_picks:
+                    mode = _ask_inject_mode()
+                    if not config.ACTIVE_GATE or active_gate(
+                        9,
+                        f"Will inject BLE packets targeting "
+                        f"{inject_picks[0].bd_address} "
+                        f"({inject_picks[0].name or inject_picks[0].device_class}). "
+                        f"Mode: {mode}. Authorized targets only.",
+                    ):
+                        s9_inject.run(
+                            dongle, inject_picks[0], eng_id, connections, mode
+                        )
+                else:
+                    log.info("Stage 9 skipped by operator.")
+            else:
+                log.info("Stage 9 skipped: no connectable targets.")
+
     except KeyboardInterrupt:
         log.info("Run aborted by user.")
     finally:
@@ -384,6 +425,27 @@ def main() -> None:
     gen_json(eng_id, args.name, args.location)
 
     _emit_summary(eng_id)
+
+
+def _ask_inject_mode() -> str:
+    """Prompt operator to select ADV injection or InjectaBLE connection mode."""
+    print("\n  Stage 9 — Select injection mode:")
+    print("    [A]  ADV injection  — flood/replay target advertisements")
+    print("                         (scan DoS / device discovery cache poisoning)")
+    print("    [I]  InjectaBLE     — inject PDUs into active BLE connection")
+    print("                         (needs S2 connection parameters: AA, CRC, hop)")
+    print("                         If no S2 data exists, you will be offered a")
+    print("                         live capture before injection proceeds.")
+    while True:
+        try:
+            choice = input("  Select mode [A/I]: ").strip().upper()
+        except (KeyboardInterrupt, EOFError):
+            return "adv"
+        if choice in ("A", ""):
+            return "adv"
+        if choice == "I":
+            return "injectable"
+        print("  Please enter A or I.")
 
 
 def _emit_summary(eng_id: str) -> None:

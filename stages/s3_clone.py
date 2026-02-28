@@ -25,13 +25,21 @@ def run(
     dongle: WhadDongle,
     target: Target,
     engagement_id: str,
+    gatt_profile: list[dict] | None = None,
 ) -> None:
     log.info(
         f"Cloning target {target.bd_address} "
         f"({target.name or 'unnamed'}, {target.device_class})"
     )
 
-    profile = _build_clone_profile(target)
+    if gatt_profile:
+        log.info(
+            f"[S3] Full GATT profile available ({len(gatt_profile)} chars) — "
+            "building faithful clone."
+        )
+        profile = _build_full_clone_profile(target, gatt_profile)
+    else:
+        profile = _build_clone_profile(target)
     adv_data = _build_adv_data(target)
 
     periph = dongle.peripheral(profile=profile)
@@ -139,6 +147,113 @@ def run(
     )
 
     _print_summary(target, connections_received)
+
+
+def _build_full_clone_profile(
+    target: Target,
+    gatt_profile: list[dict],
+) -> GenericProfile:
+    """Build a GenericProfile faithfully reconstructed from a captured GATT profile.
+
+    Groups standard 0x2Axx characteristics under 0x1800; proprietary characteristics
+    under a service inferred from target.services advertising data, or 0x1820 fallback.
+    Characteristic values are taken from captured read results when available.
+    """
+    _PROP_MAP = {
+        "read": "read",
+        "write": "write",
+        "write_no_resp": "write_without_response",
+        "write_without_response": "write_without_response",
+        "notify": "notify",
+        "indicate": "indicate",
+    }
+
+    profile = GenericProfile()
+
+    # Separate standard (0x2Axx) from proprietary characteristics
+    standard: list[dict] = []
+    proprietary: list[dict] = []
+    for c in gatt_profile:
+        uuid_str = c["uuid"].replace("-", "").lower()
+        try:
+            uuid_int = int(uuid_str, 16)
+            if 0x2A00 <= uuid_int <= 0x2AFF:
+                standard.append(c)
+            else:
+                proprietary.append(c)
+        except ValueError:
+            proprietary.append(c)
+
+    def _make_char(c: dict) -> Characteristic:
+        uuid_str = c["uuid"]
+        try:
+            uuid_clean = uuid_str.replace("-", "")
+            uuid_int = int(uuid_clean, 16)
+            uuid_obj = UUID(uuid_int) if uuid_int <= 0xFFFF else UUID(uuid_str)
+        except (ValueError, Exception):
+            uuid_obj = UUID(uuid_str)
+
+        perms = [
+            _PROP_MAP[p] for p in c.get("properties", []) if p in _PROP_MAP
+        ] or ["read"]
+
+        value = b"\x00"
+        if c.get("value_hex"):
+            try:
+                value = bytes.fromhex(c["value_hex"])
+            except ValueError:
+                pass
+        elif c.get("value_text"):
+            value = c["value_text"].encode("utf-8", errors="replace")
+
+        return Characteristic(uuid=uuid_obj, permissions=perms, value=value)
+
+    # Build 0x1800 service for standard characteristics
+    if standard:
+        svc = PrimaryService(uuid=UUID(0x1800))
+        for c in standard:
+            try:
+                svc.add(_make_char(c))
+            except Exception as exc:
+                log.debug(f"Could not add standard char {c['uuid']}: {exc}")
+        profile.add_service(svc)
+    else:
+        # Always include at least a minimal 0x1800 service
+        svc = PrimaryService(uuid=UUID(0x1800))
+        name_val = (target.name or "Unknown").encode("utf-8")
+        svc.add(Characteristic(uuid=UUID(0x2A00), permissions=["read"], value=name_val))
+        profile.add_service(svc)
+
+    # Build proprietary service(s)
+    if proprietary:
+        # Use the first non-standard service UUID from advertising, or 0x1820 fallback
+        prop_svc_uuid_str = next(
+            (
+                s for s in target.services
+                if s.lower() not in ("1800", "1801", "180a", "180d", "180f", "1810", "1812", "181a")
+            ),
+            None,
+        )
+        try:
+            if prop_svc_uuid_str:
+                if len(prop_svc_uuid_str) <= 4:
+                    prop_svc_uuid = UUID(int(prop_svc_uuid_str, 16))
+                else:
+                    prop_svc_uuid = UUID(prop_svc_uuid_str)
+            else:
+                prop_svc_uuid = UUID(0x1820)
+        except Exception:
+            prop_svc_uuid = UUID(0x1820)
+
+        prop_svc = PrimaryService(uuid=prop_svc_uuid)
+        for c in proprietary:
+            try:
+                prop_svc.add(_make_char(c))
+            except Exception as exc:
+                log.debug(f"Could not add proprietary char {c['uuid']}: {exc}")
+        profile.add_service(prop_svc)
+
+    return profile
 
 
 def _build_clone_profile(target: Target) -> GenericProfile:

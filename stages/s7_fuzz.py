@@ -66,13 +66,14 @@ def run(
     target: Target,
     engagement_id: str,
     prepped_handles: list[int] | None = None,
-) -> None:
+) -> list[int]:
+    """Run the GATT fuzz stage. Returns the writable handles discovered (may be empty)."""
     if not _cli_available():
         log.error(
             "[S7] wble-connect or wble-central not found in PATH. "
             "Install WHAD tools: pip install whad"
         )
-        return
+        return []
 
     addr = target.bd_address
     rand_flag = "-r" if target.address_type != "public" else ""
@@ -111,18 +112,18 @@ def run(
         except subprocess.TimeoutExpired:
             log.warning(f"[S7] Profile timed out after {PROFILE_TIMEOUT}s — skipping S7.")
             _reopen_dongle(dongle)
-            return
+            return []
         except Exception as exc:
             log.error(f"[S7] Profile subprocess error: {type(exc).__name__}: {exc}")
             _reopen_dongle(dongle)
-            return
+            return []
 
         log.debug(f"[S7] Raw profile stdout for {addr}: {profile_stdout[:500]!r}")
         writable_handles = _parse_writable_handles(profile_stdout)
         if not writable_handles:
             log.info(f"[S7] No writable handles found on {addr} — nothing to fuzz.")
             _reopen_dongle(dongle)
-            return
+            return []
 
         log.info(
             f"[S7] Found {len(writable_handles)} writable handle(s): "
@@ -199,6 +200,7 @@ def run(
         target, writable_handles, writes_sent, total_writes, error_count,
         crash_detected,
     )
+    return writable_handles
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
