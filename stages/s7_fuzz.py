@@ -61,7 +61,12 @@ _FUZZ_PAYLOADS: list[tuple[str, str, str]] = [
 ]
 
 
-def run(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
+def run(
+    dongle: WhadDongle,
+    target: Target,
+    engagement_id: str,
+    prepped_handles: list[int] | None = None,
+) -> None:
     if not _cli_available():
         log.error(
             "[S7] wble-connect or wble-central not found in PATH. "
@@ -72,47 +77,57 @@ def run(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
     addr = target.bd_address
     rand_flag = "-r" if target.address_type != "public" else ""
 
-    log.info(f"[S7] Phase 1 — profiling {addr} to discover writable handles ...")
-    dongle.device.close()
-    time.sleep(0.5)
-
-    profile_stdout = ""
-    try:
-        cmd_profile = (
-            f"wble-connect -i {config.INTERFACE} {rand_flag} {addr} "
-            f"| wble-central profile"
+    if prepped_handles is not None:
+        # S5 already profiled this device — skip Phase 1
+        writable_handles = prepped_handles
+        log.info(
+            f"[S7] Using {len(writable_handles)} writable handle(s) from S5: "
+            f"{writable_handles} — skipping re-profile."
         )
-        log.debug(f"[S7] Profile cmd: {cmd_profile}")
-        result = subprocess.run(
-            cmd_profile,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=PROFILE_TIMEOUT,
+        dongle.device.close()
+        time.sleep(0.5)
+    else:
+        log.info(f"[S7] Phase 1 — profiling {addr} to discover writable handles ...")
+        dongle.device.close()
+        time.sleep(0.5)
+
+        profile_stdout = ""
+        try:
+            cmd_profile = (
+                f"wble-connect -i {config.INTERFACE} {rand_flag} {addr} "
+                f"| wble-central profile"
+            )
+            log.debug(f"[S7] Profile cmd: {cmd_profile}")
+            result = subprocess.run(
+                cmd_profile,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=PROFILE_TIMEOUT,
+            )
+            profile_stdout = result.stdout
+            if result.stderr.strip():
+                log.debug(f"[S7] Profile stderr: {result.stderr.strip()[:160]}")
+        except subprocess.TimeoutExpired:
+            log.warning(f"[S7] Profile timed out after {PROFILE_TIMEOUT}s — skipping S7.")
+            _reopen_dongle(dongle)
+            return
+        except Exception as exc:
+            log.error(f"[S7] Profile subprocess error: {type(exc).__name__}: {exc}")
+            _reopen_dongle(dongle)
+            return
+
+        log.debug(f"[S7] Raw profile stdout for {addr}: {profile_stdout[:500]!r}")
+        writable_handles = _parse_writable_handles(profile_stdout)
+        if not writable_handles:
+            log.info(f"[S7] No writable handles found on {addr} — nothing to fuzz.")
+            _reopen_dongle(dongle)
+            return
+
+        log.info(
+            f"[S7] Found {len(writable_handles)} writable handle(s): "
+            f"{writable_handles} — building fuzz script ..."
         )
-        profile_stdout = result.stdout
-        if result.stderr.strip():
-            log.debug(f"[S7] Profile stderr: {result.stderr.strip()[:160]}")
-    except subprocess.TimeoutExpired:
-        log.warning(f"[S7] Profile timed out after {PROFILE_TIMEOUT}s — skipping S7.")
-        _reopen_dongle(dongle)
-        return
-    except Exception as exc:
-        log.error(f"[S7] Profile subprocess error: {type(exc).__name__}: {exc}")
-        _reopen_dongle(dongle)
-        return
-
-    writable_handles = _parse_writable_handles(profile_stdout)
-    if not writable_handles:
-        log.info(f"[S7] No writable handles found on {addr} — nothing to fuzz.")
-        _record_finding(target, engagement_id, [], 0, 0, 0, False)
-        _print_summary(target, [], 0, 0, 0, False)
-        return
-
-    log.info(
-        f"[S7] Found {len(writable_handles)} writable handle(s): "
-        f"{writable_handles} — building fuzz script ..."
-    )
 
     script_path, total_writes = _write_fuzz_script(writable_handles, engagement_id)
     log.info(
@@ -198,23 +213,40 @@ def _cli_available() -> bool:
 def _parse_writable_handles(profile_output: str) -> list[int]:
     """Extract value_handle integers for writable characteristics.
 
-    wble-central profile output format (approximate):
-      Characteristic 0x2A06 [handle=3, value_handle=4] read write
+    Actual wble-central profile output (ANSI stripped):
+      Battery Level (0x2a19) RW, handle 9, value handle: 10
+      Write Control Point (0x2a55) W, handle 22, value handle: 23
+
+    Rights letters: R=read, W=write or write_no_resp. Both write types show as 'W'.
+    Service lines ("Service ... (handle N to N)") are skipped.
     """
+    ansi_re = re.compile(r"\x1b\[[0-9;]*[mABCDEFGHJKLMSTfnsulh]")
     handles: list[int] = []
-    for line in profile_output.splitlines():
-        low = line.lower()
-        if "characteristic" not in low:
+
+    for raw_line in profile_output.splitlines():
+        line = ansi_re.sub("", raw_line).strip()
+        if not line:
             continue
-        if "write" not in low:
+
+        # Must have "value handle: N" to be a characteristic line
+        vh_match = re.search(r"\bvalue handle:\s*(\d+)", line, re.I)
+        if not vh_match:
             continue
-        # Extract value_handle if present, fall back to handle
-        vh_match = re.search(r"value_handle\s*=\s*(\d+)", line, re.I)
-        h_match  = re.search(r"handle\s*=\s*(\d+)", line, re.I)
-        if vh_match:
-            handles.append(int(vh_match.group(1)))
-        elif h_match:
-            handles.append(int(h_match.group(1)))
+
+        # Skip service lines
+        if re.match(r"service\b", line, re.I):
+            continue
+
+        # Rights section: text before ", handle N" minus the name (ends at ')')
+        prefix = re.split(r",\s*handle\s+\d+", line, maxsplit=1)[0]
+        after_name = re.sub(r".*\)", "", prefix).strip()
+        rights_letters = set((after_name or prefix).upper().replace(" ", ""))
+
+        if "W" not in rights_letters:
+            continue
+
+        handles.append(int(vh_match.group(1)))
+
     return handles
 
 
@@ -266,15 +298,18 @@ def _parse_fuzz_output(stdout: str, expected_writes: int) -> tuple[int, int]:
             writes_sent += 1
         if "error" in lo or "fail" in lo or "refused" in lo:
             error_count += 1
-    # If wble-central doesn't emit per-write acks, fall back to expected count
-    if writes_sent == 0 and error_count == 0 and stdout.strip():
+    # If no explicit acks but errors seen: those errors ARE write responses — count them.
+    if writes_sent == 0 and error_count > 0:
+        writes_sent = error_count
+    # If wble-central emits nothing at all, fall back to expected count
+    elif writes_sent == 0 and error_count == 0 and stdout.strip():
         writes_sent = expected_writes
     return writes_sent, error_count
 
 
 def _reopen_dongle(dongle: WhadDongle) -> None:
     """Re-attach the WhadDevice, polling every 0.5s up to 6s."""
-    deadline = time.time() + 6.0
+    deadline = time.time() + 15.0
     attempt = 0
     last_exc: Exception | None = None
     while time.time() < deadline:
@@ -288,7 +323,7 @@ def _reopen_dongle(dongle: WhadDongle) -> None:
             attempt += 1
             time.sleep(0.5)
     log.warning(
-        f"[S7] Could not reopen WHAD device after 6s "
+        f"[S7] Could not reopen WHAD device after 15s "
         f"({type(last_exc).__name__}: {last_exc!r})"
     )
 
@@ -304,11 +339,6 @@ def _assess(
     target: Target,
 ) -> tuple[str, str]:
     name_tag = f"{target.bd_address} ({target.name or 'unnamed'}, {target.device_class})"
-
-    if not writable_handles:
-        return "info", (
-            f"GATT fuzz found no writable characteristics on {name_tag}."
-        )
 
     if crash_detected:
         return "critical", (

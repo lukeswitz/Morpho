@@ -28,7 +28,7 @@ log = get_logger("s5_interact")
 
 CONNECT_TIMEOUT = 15
 GATT_DISCOVER_TIMEOUT = 20   # seconds for discover() call
-CLI_TIMEOUT = 30             # seconds for the full wble-connect | wble-central run
+CLI_TIMEOUT = 45             # seconds for the full wble-connect | wble-central run
 
 # Standard GATT characteristic UUID (int) → human-readable name
 UUID_NAMES: dict[int, str] = {
@@ -67,11 +67,11 @@ NOTIFY_HARVEST_SECS = 15   # max wall-clock time to listen for notifications
 NOTIFY_SILENCE_SECS = 4    # exit early after this many seconds with no new notifications
 
 
-def run(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
+def run(dongle: WhadDongle, target: Target, engagement_id: str) -> list[int]:
+    """Returns list of writable value_handles found (for S5→S7 handoff)."""
     if _cli_available():
-        _run_cli(dongle, target, engagement_id)
-    else:
-        _run_python_api(dongle, target, engagement_id)
+        return _run_cli(dongle, target, engagement_id)
+    return _run_python_api(dongle, target, engagement_id)
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +85,7 @@ def _cli_available() -> bool:
     )
 
 
-def _run_cli(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
+def _run_cli(dongle: WhadDongle, target: Target, engagement_id: str) -> list[int]:
     addr = target.bd_address
     is_random = target.address_type != "public"
     rand_flag = "-r" if is_random else ""
@@ -97,7 +97,7 @@ def _run_cli(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
 
     dongle.device.close()
     import time as _time
-    _time.sleep(0.5)
+    _time.sleep(1.0)
 
     cmd = (
         f"wble-connect -i {config.INTERFACE} {rand_flag} {addr} "
@@ -134,16 +134,25 @@ def _run_cli(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
             f"[CLI] No profile output for {addr} "
             f"(exit={returncode}): {stderr.strip()[:120]}"
         )
-        return
+        return []
+
+    log.debug(f"[CLI] Raw profile stdout for {addr}: {stdout[:500]!r}")
 
     chars, unauth_readable, unauth_writable, device_info = _parse_cli_profile(
         stdout
     )
 
     if not chars:
-        log.debug(f"[CLI] Raw profile stdout for {addr}: {stdout[:300]!r}")
-        log.info(f"[CLI] No characteristics discovered on {addr}.")
-        return
+        log.info(f"[CLI] No characteristics parsed on {addr} — check debug log for raw output.")
+        return []
+
+    if not unauth_readable and not unauth_writable:
+        log.info(
+            f"[CLI] {addr}: {len(chars)} characteristic(s) found, "
+            "all require authentication — no finding."
+        )
+        return [c.value_handle for c in chars
+                if "write" in c.properties or "write_no_resp" in c.properties]
 
     _record_finding(
         addr, target, engagement_id,
@@ -152,12 +161,13 @@ def _run_cli(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
     _print_summary(
         addr, target, chars, unauth_readable, unauth_writable, device_info,
     )
+    return [c.value_handle for c in unauth_writable]
 
 
 def _reopen_dongle(dongle: WhadDongle) -> None:
-    """Re-attach the underlying WhadDevice, polling every 0.5s up to 6s."""
+    """Re-attach the underlying WhadDevice, polling every 0.5s up to 15s."""
     import time as _time
-    deadline = _time.time() + 6.0
+    deadline = _time.time() + 15.0
     attempt = 0
     last_exc: Exception | None = None
     while _time.time() < deadline:
@@ -171,7 +181,7 @@ def _reopen_dongle(dongle: WhadDongle) -> None:
             attempt += 1
             _time.sleep(0.5)
     log.warning(
-        f"Could not reopen WHAD device after 6s "
+        f"Could not reopen WHAD device after 15s "
         f"({type(last_exc).__name__}: {last_exc!r})"
     )
 
@@ -187,12 +197,20 @@ def _parse_cli_profile(
     """
     Parse `wble-central profile` text output into GattCharacteristic objects.
 
-    WHAD profile output format (approximate):
-        Service 0x1800 (Generic Access)
-          Characteristic 0x2A00 [handle=3, value_handle=4] read write
-            Value: 41 63 65 72 ...
-          Characteristic 0x2A01 [handle=5, value_handle=6] read
+    Actual wble-central profile output format (ANSI codes stripped):
+        Service Generic Access (0x1800) (handle 1 to 7)
+          Device Name (0x2a00) R, handle 3, value handle: 4
+            Value: 4163657200
+          Battery Level (0x2a19) RW, handle 9, value handle: 10
+        ...
+
+    Rights letters: R=read, W=write or write_no_resp, N=notify, I=indicate.
+    Both Write and Write_Without_Response display as 'W' — we add both.
     """
+    # Strip ANSI/prompt_toolkit escape codes
+    ansi_re = re.compile(r"\x1b\[[0-9;]*[mABCDEFGHJKLMSTfnsulh]")
+    clean = ansi_re.sub("", output)
+
     chars: list[GattCharacteristic] = []
     unauth_readable: list[GattCharacteristic] = []
     unauth_writable: list[GattCharacteristic] = []
@@ -200,22 +218,42 @@ def _parse_cli_profile(
 
     current_char: GattCharacteristic | None = None
 
-    for raw_line in output.splitlines():
+    for raw_line in clean.splitlines():
         line = raw_line.strip()
         if not line:
             continue
 
-        # Characteristic line
-        char_match = re.search(
-            r"[Cc]haracteristic\s+(?:0x)?([0-9A-Fa-f-]{4,36})"
-            r"(?:.*?handle=(\d+))?(?:.*?value_handle=(\d+))?",
-            line,
-        )
-        if char_match:
-            uuid_str = char_match.group(1).upper()
-            handle = int(char_match.group(2)) if char_match.group(2) else 0
-            value_handle = int(char_match.group(3)) if char_match.group(3) else handle
-            props = _extract_props_from_line(line)
+        # Characteristic lines always contain "value handle: N"
+        vh_match = re.search(r"\bvalue handle:\s*(\d+)", line, re.I)
+        h_match = re.search(r"\bhandle\s+(\d+)", line, re.I)
+
+        if vh_match or h_match:
+            # Skip service-level lines ("Service ... (handle N to N)")
+            if re.match(r"service\b", line, re.I):
+                current_char = None
+                continue
+
+            value_handle = int(vh_match.group(1)) if vh_match else 0
+            handle = int(h_match.group(1)) if h_match else value_handle
+
+            # Extract UUID from "(0xNNNN)" or full 128-bit UUID in the line
+            uuid_str = f"ATTR{value_handle:04X}"
+            uuid16_m = re.search(r"\(0x([0-9A-Fa-f]{4,8})\)", line)
+            uuid128_m = re.search(
+                r"([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}"
+                r"-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})",
+                line,
+            )
+            if uuid16_m:
+                uuid_str = uuid16_m.group(1).upper()
+            elif uuid128_m:
+                uuid_str = uuid128_m.group(1).upper()
+
+            # Rights section: text before ", handle" minus the name portion
+            # Name ends at last ')' or at start of rights letters
+            prefix = re.split(r",\s*handle\s+\d+", line, maxsplit=1)[0]
+            props = _extract_props_from_rights(prefix)
+
             current_char = GattCharacteristic(
                 uuid=uuid_str,
                 handle=handle,
@@ -225,8 +263,8 @@ def _parse_cli_profile(
             chars.append(current_char)
             continue
 
-        # Value line
-        if current_char and re.match(r"[Vv]alue\s*:", line):
+        # Value line: "Value: <hex>"
+        if current_char and re.match(r"value\s*:", line, re.I):
             raw_val = line.split(":", 1)[1].strip()
             _decode_char_value(current_char, raw_val)
             uuid_int = _uuid_to_int(current_char.uuid)
@@ -244,11 +282,11 @@ def _parse_cli_profile(
         ):
             current_char.requires_auth = True
 
-    # Write access: any writable char that has a value (was accessible)
+    # Write access: writable chars not confirmed to require auth.
+    # Write-only chars have no value line so value_hex is None — include them.
     for char in chars:
         if (
             ("write" in char.properties or "write_no_resp" in char.properties)
-            and char.value_hex is not None
             and not char.requires_auth
             and char not in unauth_writable
         ):
@@ -257,17 +295,29 @@ def _parse_cli_profile(
     return chars, unauth_readable, unauth_writable, device_info
 
 
-def _extract_props_from_line(line: str) -> list[str]:
-    props = []
-    if re.search(r"\bread\b", line, re.I):
+def _extract_props_from_rights(prefix: str) -> list[str]:
+    """Extract property list from the characteristic line prefix (before ', handle N').
+
+    wble-central shows rights as single letters after the characteristic name:
+      R = read, W = write or write_without_response, N = notify, I = indicate
+    Both Write and Write_Without_Response display as 'W', so we add both.
+    """
+    # Rights letters appear after the last ')' (end of name) or at end of prefix
+    after_name = re.sub(r".*\)", "", prefix).strip()
+    if not after_name:
+        after_name = prefix
+
+    props: list[str] = []
+    letters = set(after_name.upper().replace(" ", ""))
+    if "R" in letters:
         props.append("read")
-    if re.search(r"\bwrite[-_]no[-_]resp\b", line, re.I):
-        props.append("write_no_resp")
-    elif re.search(r"\bwrite\b", line, re.I):
+    if "W" in letters:
+        # Can't distinguish write vs write_no_resp from single-letter display
         props.append("write")
-    if re.search(r"\bnotify\b", line, re.I):
+        props.append("write_no_resp")
+    if "N" in letters:
         props.append("notify")
-    if re.search(r"\bindicate\b", line, re.I):
+    if "I" in letters:
         props.append("indicate")
     return props
 
@@ -276,7 +326,7 @@ def _extract_props_from_line(line: str) -> list[str]:
 # Python API fallback
 # ---------------------------------------------------------------------------
 
-def _run_python_api(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
+def _run_python_api(dongle: WhadDongle, target: Target, engagement_id: str) -> list[int]:
     addr = target.bd_address
     is_random = target.address_type != "public"
 
@@ -415,7 +465,15 @@ def _run_python_api(dongle: WhadDongle, target: Target, engagement_id: str) -> N
 
     if not chars:
         log.info(f"No characteristics discovered on {addr}.")
-        return
+        return []
+
+    if not unauth_readable and not unauth_writable:
+        log.info(
+            f"{addr}: {len(chars)} characteristic(s) found, "
+            "all require authentication — no finding."
+        )
+        return [c.value_handle for c in chars
+                if "write" in c.properties or "write_no_resp" in c.properties]
 
     _record_finding(
         addr, target, engagement_id,
@@ -426,6 +484,7 @@ def _run_python_api(dongle: WhadDongle, target: Target, engagement_id: str) -> N
         addr, target, chars, unauth_readable, unauth_writable, device_info,
         notifications,
     )
+    return [c.value_handle for c in unauth_writable]
 
 
 def _harvest_notifications(

@@ -49,8 +49,8 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--stages",
-        default="1,2,3,4,5",
-        help="Comma-separated list of stages to run (default: 1,2,3,4,5)",
+        default="1,2,3,4,5,7",
+        help="Comma-separated list of stages to run (default: 1,2,3,4,5,7)",
     )
     p.add_argument(
         "--no-gate",
@@ -127,6 +127,8 @@ def main() -> None:
 
     targets = []
     connections = []
+    # addr → writable value_handles found by S5 (used by S7 to skip re-profile)
+    gatt_writable: dict[str, list[int]] = {}
 
     try:
         if 1 in stages_requested:
@@ -230,7 +232,9 @@ def main() -> None:
                     ):
                         from stages import s5_interact
                         for t in gatt_picks:
-                            s5_interact.run(dongle, t, eng_id)
+                            handles = s5_interact.run(dongle, t, eng_id)
+                            if handles:
+                                gatt_writable[t.bd_address] = handles
                 else:
                     log.info("Stage 5 skipped by operator.")
             else:
@@ -272,22 +276,53 @@ def main() -> None:
             connectable = [t for t in targets if t.connectable]
             if connectable:
                 stage_banner(7, "GATT Write Fuzzer", passive=False)
-                fuzz_picks = select_targets(
-                    connectable,
-                    prompt="Stage 7 — Select targets for GATT write fuzzing",
-                    default_all=False,
-                    smart_skip_classes={"it_gear"},
-                )
+
+                # If S5 ran and found writable handles, pre-select those targets
+                if gatt_writable:
+                    s5_fuzz_targets = [
+                        t for t in connectable if t.bd_address in gatt_writable
+                    ]
+                    if s5_fuzz_targets:
+                        print(
+                            f"\n  Stage 7 — S5 found writable characteristics on "
+                            f"{len(s5_fuzz_targets)} device(s):\n"
+                        )
+                        for t in s5_fuzz_targets:
+                            h = gatt_writable[t.bd_address]
+                            print(
+                                f"    {t.bd_address:<20}  "
+                                f"{t.name or '—':<20}  "
+                                f"handles={h}"
+                            )
+                        fuzz_picks = s5_fuzz_targets
+                    else:
+                        fuzz_picks = select_targets(
+                            connectable,
+                            prompt="Stage 7 — Select targets for GATT write fuzzing",
+                            default_all=False,
+                            smart_skip_classes={"it_gear"},
+                        )
+                else:
+                    fuzz_picks = select_targets(
+                        connectable,
+                        prompt="Stage 7 — Select targets for GATT write fuzzing",
+                        default_all=False,
+                        smart_skip_classes={"it_gear"},
+                    )
+
                 if fuzz_picks:
                     if not config.ACTIVE_GATE or active_gate(
                         7,
-                        f"Will write fuzz payloads to {len(fuzz_picks)} device(s). "
+                        f"Will write fuzz payloads to {len(fuzz_picks)} device(s).\n "
                         "Sends crafted/malformed data and may crash or disrupt targets. "
                         "Authorized targets only.",
                     ):
                         from stages import s7_fuzz
                         for t in fuzz_picks:
-                            s7_fuzz.run(dongle, t, eng_id)
+                            s7_fuzz.run(
+                                dongle, t, eng_id,
+                                prepped_handles=gatt_writable.get(t.bd_address),
+                            )
                 else:
                     log.info("Stage 7 skipped by operator.")
             else:
@@ -300,12 +335,8 @@ def main() -> None:
 
     from output.markdown_report import generate as gen_md
     from output.json_report import generate as gen_json
-    md_path = gen_md(eng_id, args.name, args.location)
-    if md_path:
-        log.info(f"Markdown report: {md_path}")
-    json_path = gen_json(eng_id, args.name, args.location)
-    if json_path:
-        log.info(f"JSON report:     {json_path}")
+    gen_md(eng_id, args.name, args.location)
+    gen_json(eng_id, args.name, args.location)
 
     _emit_summary(eng_id)
 
@@ -340,6 +371,18 @@ def _emit_summary(eng_id: str) -> None:
         count = sev_counts.get(sev, 0)
         if count:
             print(f"    {sev:<12} {count}")
+
+    if findings:
+        print("\n  Finding details:")
+        for f in sorted(findings, key=lambda x: ("critical","high","medium","low","info").index(x["severity"])):
+            desc = f.get("description", "")
+            short = desc[:80] + "…" if len(desc) > 80 else desc
+            print(
+                f"    [{f['severity'].upper():<8}]  "
+                f"{f['target_addr']:<20}  "
+                f"{f['type']:<16}  "
+                f"{short}"
+            )
 
     print(f"\n  Database: {config.DB_PATH}")
     print("=" * 60 + "\n")
