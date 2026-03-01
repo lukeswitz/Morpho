@@ -30,6 +30,7 @@ from core.dongle import WhadDongle
 from core.models import Target, Finding
 from core.db import insert_finding
 from core.logger import get_logger
+from core.pcap import pcap_path, attach_monitor, detach_monitor
 
 log = get_logger("s8_poc")
 
@@ -87,6 +88,7 @@ def run(
     )
 
     central    = dongle.central()
+    _monitor   = attach_monitor(central, pcap_path(engagement_id, 8, addr))
     periph_dev = None
     results: list[WriteResult]  = []
     baseline: dict[int, bytes]  = {}
@@ -193,6 +195,7 @@ def run(
                 periph_dev.disconnect()
             except Exception:
                 pass
+        detach_monitor(_monitor)
 
     evidence = _build_evidence(results, baseline, notifications)
     _record_finding(target, engagement_id, actions, results, evidence)
@@ -204,14 +207,15 @@ def run(
 def _plan_actions(writable: list[dict], notify_uuids: set[str]) -> list[dict]:
     actions: list[dict] = []
     for char in writable:
-        uuid   = char["uuid"].upper()
-        handle = char["value_handle"]
+        uuid      = char["uuid"].upper()
+        handle    = char["value_handle"]
+        uuid_norm = _normalize_uuid(uuid)  # short form for BT SIG; unchanged for vendor
 
-        if uuid == "2A00":
+        if uuid_norm == "2A00":
             actions.append({"label": "device_name_rename", "handle": handle, "uuid": uuid})
-        elif uuid == "2A06":
+        elif uuid_norm == "2A06":
             actions.append({"label": "alert_level_trigger", "handle": handle, "uuid": uuid})
-        elif uuid == "2A39":
+        elif uuid_norm == "2A39":
             actions.append({"label": "hr_control_reset", "handle": handle, "uuid": uuid})
         else:
             has_pair = _has_notify_pair(uuid, notify_uuids)
@@ -392,6 +396,26 @@ _PROP_WRITE    = 0x08
 _PROP_NOTIFY   = 0x10
 _PROP_INDICATE = 0x20
 
+# All standard BT SIG 128-bit UUIDs share this suffix after position 8.
+# Using [9:] to match "notify pairs" on this suffix produces false positives
+# (every standard char would match every other standard notify char).
+_BT_SIG_SUFFIX = "0000-1000-8000-00805F9B34FB"
+
+
+def _normalize_uuid(uuid: str) -> str:
+    """Return the 4-hex short form for BT SIG UUIDs; leave vendor UUIDs unchanged.
+
+    Handles both formats WHAD may return:
+      short : "2A00"
+      full  : "00002A00-0000-1000-8000-00805F9B34FB"
+    """
+    if "-" not in uuid:
+        return uuid
+    # BT SIG pattern: 0000XXXX-0000-1000-8000-00805F9B34FB
+    if uuid[:4] == "0000" and uuid[9:] == _BT_SIG_SUFFIX:
+        return uuid[4:8]   # "00002A00-..." → "2A00"
+    return uuid
+
 
 def _enumerate_profile(dongle: WhadDongle, periph_dev) -> list[dict]:
     """Build a GATT profile dict list from an already-discovered connection.
@@ -455,18 +479,31 @@ def _discover_with_timeout(periph_dev, addr: str) -> bool:
 
 
 def _has_notify_pair(write_uuid: str, notify_uuids: set[str]) -> bool:
+    """True if write_uuid has a companion notify UUID in the same vendor service.
+
+    Only applies to vendor 128-bit UUIDs. All BT SIG standard UUIDs share the
+    suffix 0000-1000-8000-00805F9B34FB, so [9:] matching on them produces
+    false positives (every standard char pairs with every other standard notify).
+    """
     if "-" not in write_uuid:
         return False
+    if write_uuid[9:] == _BT_SIG_SUFFIX:  # BT SIG UUID — skip
+        return False
     suffix = write_uuid[9:]
-    return any("-" in n and n[9:] == suffix and n != write_uuid for n in notify_uuids)
+    return any(
+        "-" in n and n[9:] == suffix and n != write_uuid and n[9:] != _BT_SIG_SUFFIX
+        for n in notify_uuids
+    )
 
 
 def _find_notify_pair_uuid(write_uuid: str, notify_uuids: set[str]) -> str | None:
     if "-" not in write_uuid:
         return None
+    if write_uuid[9:] == _BT_SIG_SUFFIX:
+        return None
     suffix = write_uuid[9:]
     for n in notify_uuids:
-        if "-" in n and n[9:] == suffix and n != write_uuid:
+        if "-" in n and n[9:] == suffix and n != write_uuid and n[9:] != _BT_SIG_SUFFIX:
             return n
     return None
 

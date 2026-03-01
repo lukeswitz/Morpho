@@ -41,7 +41,7 @@ def active_gate(stage: int, description: str) -> bool:
     print(f"\n{'--^----' * 10}")
     print(f"  ACTIVE STAGE {stage} GATE")
     print(f"  {description}")
-    print(f"{'------^' * 10}")
+    print(f"{'-------' * 10}")
     print("\n  This stage will transmit RF packets.")
     print("  Only proceed on equipment you own or have written authorization to test.\n")
     while True:

@@ -45,6 +45,8 @@ class DongleCaps:
     can_reactive_jam:   bool = False  # BLE.reactive_jam() method present
     can_central:        bool = False  # Central connector works
     can_peripheral:     bool = False  # Peripheral connector works
+    can_unifying:       bool = False  # Logitech Unifying (ESB) domain available
+    can_phy:            bool = False  # PHY raw modulation domain available
     firmware_version:   str | None = None
     device_type:        str = "unknown"  # "butterfly" | "hci" | "unknown"
 
@@ -61,6 +63,8 @@ class DongleCaps:
             f"  Reactive jam    : {tick(self.can_reactive_jam)}",
             f"  Central         : {tick(self.can_central)}",
             f"  Peripheral      : {tick(self.can_peripheral)}",
+            f"  Unifying (ESB)  : {tick(self.can_unifying)}",
+            f"  PHY (ISM band)  : {tick(self.can_phy)}",
         ]
 
 
@@ -235,6 +239,24 @@ class WhadDongle:
             log.debug("Cap probe: Peripheral OK")
         except ImportError as exc:
             log.warning(f"Cap probe: Peripheral not available ({exc})")
+
+        # --- Probe 7: Logitech Unifying — check CLI tools in PATH ---
+        import shutil as _shutil
+        _uni_tools = ["wuni-scan", "wuni-keyboard", "wuni-mouse"]
+        if all(_shutil.which(t) for t in _uni_tools):
+            caps.can_unifying = True
+            log.debug("Cap probe: Unifying OK (CLI tools found)")
+        else:
+            _missing = [t for t in _uni_tools if not _shutil.which(t)]
+            log.warning(f"Cap probe: Unifying CLI tools not found: {_missing}")
+
+        # --- Probe 8: PHY raw modulation domain ---
+        try:
+            from whad.phy import Sniffer as _PhySniffer  # noqa: F401
+            caps.can_phy = True
+            log.debug("Cap probe: PHY OK")
+        except ImportError as exc:
+            log.warning(f"Cap probe: PHY not available ({exc})")
 
         log.info("Capability probe complete.")
 

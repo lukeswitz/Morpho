@@ -462,6 +462,10 @@ def _run_python_api(dongle: WhadDongle, target: Target, engagement_id: str) -> t
     if notify_chars and periph_dev is not None:
         notifications = _harvest_notifications(periph_dev, notify_chars, addr)
 
+    # --- Standard service rich queries (BatteryService, DIS, HeartRateService) ---
+    if periph_dev is not None:
+        _query_standard_services(periph_dev, device_info, addr)
+
     try:
         if periph_dev is not None:
             periph_dev.disconnect()
@@ -475,6 +479,18 @@ def _run_python_api(dongle: WhadDongle, target: Target, engagement_id: str) -> t
         return [], []
 
     profile = [_char_to_dict(c) for c in chars]
+
+    # Save profile to JSON for offline analysis and sharing.
+    import json as _json
+    _profile_path = (
+        config.REPORT_DIR
+        / f"s5_profile_{addr.replace(':', '')}_{engagement_id}.json"
+    )
+    try:
+        _profile_path.write_text(_json.dumps(profile, indent=2))
+        log.info(f"[S5] Profile saved: {_profile_path}")
+    except Exception as exc:
+        log.debug(f"[S5] Profile save: {exc}")
 
     if not unauth_readable and not unauth_writable:
         log.info(
@@ -586,6 +602,48 @@ def _harvest_notifications(
         f"  Notification harvest complete: {len(collected)} update(s) received"
     )
     return collected
+
+
+def _query_standard_services(periph_dev, device_info: dict, addr: str) -> None:
+    """Best-effort standard service enrichment via WHAD Profile API.
+
+    Queries BatteryService, DeviceInformationService, and HeartRateService if
+    present on the target. Results are merged into device_info for the Finding.
+    All errors are silenced — this is an additive enrichment, not a hard requirement.
+    """
+    try:
+        from whad.ble.profile.services.battery import BatteryService
+        if periph_dev.has(BatteryService):
+            svc = periph_dev.query(BatteryService)
+            level = svc.percentage
+            device_info["battery_level_pct"] = level
+            log.info(f"[S5] Battery level: {level}%")
+    except Exception as exc:
+        log.debug(f"[S5] BatteryService query: {exc}")
+
+    try:
+        from whad.ble.profile.services.dis import DeviceInformationService
+        if periph_dev.has(DeviceInformationService):
+            dis = periph_dev.query(DeviceInformationService)
+            dis_fields = {
+                k: getattr(dis, k, None)
+                for k in ("manufacturer_name", "model_number",
+                          "firmware_revision", "serial_number")
+            }
+            device_info["dis"] = dis_fields
+            log.info(f"[S5] DIS: {dis_fields}")
+    except Exception as exc:
+        log.debug(f"[S5] DIS query: {exc}")
+
+    try:
+        from whad.ble.profile.services.hrs import HeartRateService
+        if periph_dev.has(HeartRateService):
+            hrs = periph_dev.query(HeartRateService)
+            bpm = getattr(hrs, "rate", None)
+            device_info["heart_rate_bpm"] = bpm
+            log.info(f"[S5] Heart rate: {bpm} bpm")
+    except Exception as exc:
+        log.debug(f"[S5] HRS query: {exc}")
 
 
 def _discover_with_timeout(periph_dev, addr: str) -> bool:

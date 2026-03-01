@@ -27,32 +27,56 @@ def pcap_path(engagement_id: str, stage: int, addr: str) -> Path:
     return config.PCAP_DIR / filename
 
 
-def attach_monitor(connector: Any, path: Path) -> dict | None:
-    """Store PCAP path for CLI tool capture (Python API has no monitor).
+def attach_monitor(connector: Any, path: Path) -> Any:
+    """Attach a PCAP writer monitor to a WHAD connector.
+
+    Tries whad's PcapWriterMonitor first for real packet capture.
+    Falls back to a path-storage stub when unavailable (CLI stages).
 
     Args:
-        connector: Any WHAD connector (unused, for API compatibility).
+        connector: Any WHAD connector (Central, Peripheral, Sniffer …).
         path: Filesystem path for the PCAP output file.
 
     Returns:
-        Dict with pcap_path key, or None on failure.
+        PcapWriterMonitor instance on success, stub dict on fallback,
+        or None if even the directory cannot be created.
     """
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        log.debug(f"PCAP will be captured to: {path}")
-        return {"pcap_path": str(path)}
     except Exception as exc:
         log.warning(f"PCAP path setup failed for {path}: {exc}")
         return None
 
+    try:
+        from whad.device.connector.monitors import PcapWriterMonitor
+        monitor = PcapWriterMonitor(str(path))
+        monitor.attach(connector)
+        monitor.start()
+        log.debug(f"PcapWriterMonitor active → {path}")
+        return monitor
+    except Exception as exc:
+        log.debug(f"PcapWriterMonitor unavailable ({exc}); using path stub")
 
-def detach_monitor(monitor: dict | None) -> None:
-    """No-op for Python API (PCAP handled by CLI tools).
+    # Fallback: stub dict — CLI tools will write the PCAP directly.
+    log.debug(f"PCAP will be captured to: {path}")
+    return {"pcap_path": str(path)}
 
-    Safe to call with None or dict from attach_monitor().
+
+def detach_monitor(monitor: Any) -> None:
+    """Detach and stop a monitor returned by attach_monitor().
+
+    Safe to call with None, a stub dict, or a real PcapWriterMonitor.
     """
     if monitor is None:
         return
-    pcap_path = monitor.get("pcap_path")
-    if pcap_path:
-        log.debug(f"PCAP capture complete: {pcap_path}")
+    if isinstance(monitor, dict):
+        p = monitor.get("pcap_path")
+        if p:
+            log.debug(f"PCAP capture complete: {p}")
+        return
+    # Real PcapWriterMonitor object.
+    try:
+        monitor.detach()
+        log.debug("PcapWriterMonitor detached.")
+    except Exception as exc:
+        log.debug(f"Monitor detach: {exc}")

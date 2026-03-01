@@ -70,8 +70,9 @@ python main.py -n "Engagement1" -l "Building A" --no-gate
 | 7 | GATT Write Fuzzer | Active | Feeds oversized/malformed payloads to all writable handles; detects crashes and error rates |
 | 8 | Semantic PoC | Active | Targeted GATT writes — device rename (0x2A00), alert trigger (0x2A06), HR control reset (0x2A39), proprietary probe |
 | 9 | Packet Injection | Active | ADV flood/replay via `wsniff`+`winject`; InjectaBLE PDU injection into live connections (requires S2 data) |
+| 10 | Logitech Unifying | Active | Passive scan for Unifying mice/keyboards on 2.4 GHz ESB channels; MouseJack keystroke/mouse injection into vulnerable receivers (`whad.unifying`) |
 
-Stage 4 is excluded from the default pipeline and must be explicitly added via `--stages`.
+Stages 4, 9, and 10 are excluded from the default pipeline and must be added explicitly via `--stages`.
 
 ---
 
