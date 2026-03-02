@@ -251,12 +251,19 @@ class WhadDongle:
             log.warning(f"Cap probe: Unifying CLI tools not found: {_missing}")
 
         # --- Probe 8: PHY raw modulation domain ---
-        try:
-            from whad.phy import Sniffer as _PhySniffer  # noqa: F401
-            caps.can_phy = True
-            log.debug("Cap probe: PHY OK")
-        except ImportError as exc:
-            log.warning(f"Cap probe: PHY not available ({exc})")
+        # Try package-level export first, then direct module path as fallback.
+        for _phy_path in ("whad.phy", "whad.phy.connector.sniffer"):
+            try:
+                import importlib as _il
+                _phy_mod = _il.import_module(_phy_path)
+                if hasattr(_phy_mod, "Sniffer"):
+                    caps.can_phy = True
+                    log.debug(f"Cap probe: PHY OK ({_phy_path})")
+                    break
+            except ImportError:
+                continue
+        if not caps.can_phy:
+            log.warning("Cap probe: PHY not available (whad.phy import failed)")
 
         # --- Probe 9: ESB (Enhanced ShockBurst) raw domain ---
         try:

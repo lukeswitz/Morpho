@@ -55,11 +55,28 @@ def run(dongle: WhadDongle, engagement_id: str) -> None:
         dongle: Active WHAD dongle.
         engagement_id: Engagement ID for Finding storage.
     """
-    try:
-        from whad.phy import Sniffer as PhySniffer, SnifferConfiguration
-    except ImportError as exc:
-        log.warning(f"[S12] whad.phy not available — stage skipped. ({exc})")
+    PhySniffer = None
+    SnifferConfiguration = None
+    for _phy_path in ("whad.phy", "whad.phy.connector.sniffer"):
+        try:
+            import importlib as _il
+            _mod = _il.import_module(_phy_path)
+            if hasattr(_mod, "Sniffer"):
+                PhySniffer = _mod.Sniffer
+                break
+        except ImportError:
+            continue
+    if PhySniffer is None:
+        log.warning("[S12] whad.phy not available — stage skipped.")
         return
+    try:
+        from whad.phy.sniffing import SnifferConfiguration
+    except ImportError:
+        try:
+            from whad.phy import SnifferConfiguration
+        except ImportError:
+            log.warning("[S12] SnifferConfiguration not importable — stage skipped.")
+            return
 
     log.info(
         f"[S12] Sweeping 2.4 GHz ISM band "

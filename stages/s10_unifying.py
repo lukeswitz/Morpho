@@ -75,7 +75,6 @@ def run(dongle: WhadDongle, engagement_id: str, mode: str) -> None:
 def _run_sniff_mode(dongle: WhadDongle, engagement_id: str) -> None:
     """Passive scan then optional keylogging via wuni-scan + wuni-keyboard."""
     log.info(f"[S10][sniff] Scanning all Unifying channels for {SCAN_SECS}s ...")
-    log.info("[S10][sniff] Move or type on any nearby Logitech Unifying device to detect it.")
 
     dongle.device.close()
     time.sleep(0.5)
@@ -158,7 +157,6 @@ def _run_sniff_mode(dongle: WhadDongle, engagement_id: str) -> None:
 def _run_inject_mode(dongle: WhadDongle, engagement_id: str) -> None:
     """MouseJack: discover devices via wuni-scan, then inject via wuni-keyboard/-mouse."""
     log.info(f"[S10][inject] Scanning for Unifying devices ({INJECT_SECS}s) ...")
-    log.info("[S10][inject] Move or type on any nearby Logitech Unifying device to detect it.")
 
     dongle.device.close()
     time.sleep(0.5)
@@ -244,38 +242,55 @@ def _run_inject_mode(dongle: WhadDongle, engagement_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _wuni_scan(duration: float) -> dict[str, str]:
-    """Run wuni-scan for `duration` seconds; return {addr: device_type} dict."""
+    """Run wuni-scan for `duration` seconds; return {addr: device_type} dict.
+
+    wuni-scan may exit immediately after a single sweep, so we restart it in a
+    loop until the full scan window has elapsed.
+    """
     seen: dict[str, str] = {}
+    deadline = time.time() + duration
     try:
-        proc = subprocess.Popen(
-            ["wuni-scan", "-i", config.INTERFACE],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        )
-        timer = threading.Timer(duration, proc.terminate)
-        timer.start()
-        try:
-            assert proc.stdout is not None
-            for line in proc.stdout:
-                m = _SCAN_LINE.match(line)
-                if not m:
-                    continue
-                addr = m.group(1).lower()
-                desc = m.group(2).lower()
-                dtype = ("keyboard" if "key" in desc
-                         else "mouse" if "mouse" in desc
-                         else "unknown")
-                if addr not in seen:
-                    log.info(f"[S10] Unifying device: {addr} ({dtype})")
-                    seen[addr] = dtype
-                elif seen[addr] == "unknown" and dtype != "unknown":
-                    seen[addr] = dtype
-        finally:
-            timer.cancel()
-            proc.terminate()
+        while time.time() < deadline:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            proc = subprocess.Popen(
+                ["wuni-scan", "-i", config.INTERFACE],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            t_start = time.time()
+            timer = threading.Timer(remaining, proc.terminate)
+            timer.start()
             try:
-                proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    m = _SCAN_LINE.match(line)
+                    if not m:
+                        continue
+                    addr = m.group(1).lower()
+                    desc = m.group(2).lower()
+                    dtype = ("keyboard" if "key" in desc
+                             else "mouse" if "mouse" in desc
+                             else "unknown")
+                    if addr not in seen:
+                        log.info(f"[S10] Unifying device: {addr} ({dtype})")
+                        seen[addr] = dtype
+                    elif seen[addr] == "unknown" and dtype != "unknown":
+                        seen[addr] = dtype
+            finally:
+                timer.cancel()
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                # If the process died almost instantly, log stderr to help diagnose
+                elapsed = time.time() - t_start
+                if elapsed < 2.0:
+                    stderr_out = (proc.stderr.read() if proc.stderr else "").strip()
+                    if stderr_out:
+                        log.debug(f"[S10] wuni-scan stderr: {stderr_out}")
+                    time.sleep(0.5)  # avoid tight restart loop
     except FileNotFoundError:
         log.warning("[S10] wuni-scan not found")
     except Exception as exc:
