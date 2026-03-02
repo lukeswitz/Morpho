@@ -179,13 +179,26 @@ def run(dongle: WhadDongle, engagement_id: str) -> list[Target]:
         f"Starting passive scan for {config.SCAN_DURATION}s "
         f"on {config.INTERFACE}"
     )
-    log.info(
-        "Listening on advertising channels 37, 38, 39..."
-    )
+    log.info("Listening on advertising channels 37, 38, 39...")
+    if config.RSSI_MIN_FILTER:
+        log.info(f"[S1] RSSI filter: ignoring devices below {config.RSSI_MIN_FILTER} dBm")
 
     _monitor = None
     scanner = dongle.scanner()
     _monitor = attach_monitor(scanner, pcap_path(engagement_id, 1, "scan"))
+
+    # Hardware address filter: reduce firmware overhead for single-target scans.
+    if len(config.TARGET_FILTER) == 1:
+        _hw_addr = list(config.TARGET_FILTER)[0]
+        try:
+            scanner.filter_address = _hw_addr
+            log.info(f"[S1] Hardware address filter set: {_hw_addr}")
+        except AttributeError:
+            log.debug(
+                "[S1] Scanner.filter_address not supported on this WHAD version "
+                "— software filter active"
+            )
+
     scanner.start()
 
     try:
@@ -202,6 +215,10 @@ def run(dongle: WhadDongle, engagement_id: str) -> list[Target]:
                 meta = getattr(pkt, "metadata", None)
                 if meta is not None:
                     rssi = getattr(meta, "rssi", 0) or 0
+
+                # RSSI filter: drop devices below minimum signal threshold.
+                if config.RSSI_MIN_FILTER and rssi < config.RSSI_MIN_FILTER:
+                    continue
 
                 if (
                     config.TARGET_FILTER

@@ -50,11 +50,14 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--stages",
-        default="1,2,3,4,5,7,8",
+        default="auto",
         help=(
-            "Comma-separated list of stages to run (default: 1,2,3,4,5,7,8). "
-            "Stages 9 and 10 must be added explicitly: "
-            "9=BLE injection/replay, 10=Logitech Unifying/MouseJack"
+            "Comma-separated list of stages to run, or 'auto' to select based on "
+            "dongle capabilities (default: auto). "
+            "1=BLE scan, 2=conn intel, 3=clone, 4=jam, 5=GATT enum, 7=fuzz, "
+            "8=PoC, 9=inject (opt-in), 10=Unifying, 11=ZigBee, 12=PHY, "
+            "13=SMP pairing, 14=ESB, 15=LoRaWAN. "
+            "Stages 6 (proxy, needs 2 interfaces) and 9 (injection) always require explicit opt-in."
         ),
     )
     p.add_argument(
@@ -137,12 +140,19 @@ def main() -> None:
 
     _banner(eng_id, args.name, args.location)
 
-    stages_requested = {
-        int(s.strip()) for s in args.stages.split(",") if s.strip().isdigit()
-    }
+    _stages_arg = args.stages.strip().lower()
 
     dongle = WhadDongle.create(config.INTERFACE)
     _caps_banner(dongle)
+
+    if _stages_arg == "auto":
+        stages_requested = _stages_from_caps(dongle.caps)
+        _print_auto_stages(stages_requested)
+    else:
+        stages_requested = {
+            int(s.strip()) for s in args.stages.split(",") if s.strip().isdigit()
+        }
+        _warn_unsupported_stages(stages_requested, dongle.caps)
 
     targets = []
     connections = []
@@ -381,10 +391,15 @@ def main() -> None:
                     "Authorized targets only.",
                 ):
                     from stages import s8_poc
+                    _name_input = input(
+                        "  Custom name for 0x2A00 rename [BLE-PoC]: "
+                    ).strip()
+                    poc_name = _name_input if _name_input else "BLE-PoC"
                     for t in poc_targets:
                         s8_poc.run(
                             dongle, t, eng_id,
                             gatt_profiles.get(t.bd_address, []),
+                            poc_name=poc_name,
                         )
             else:
                 log.info("Stage 8 skipped: no writable targets identified by S5 or S7.")
@@ -432,6 +447,54 @@ def main() -> None:
             else:
                 log.info("Stage 10 skipped by operator.")
 
+        if 11 in stages_requested:
+            from stages import s11_zigbee
+
+            stage_banner(11, "IEEE 802.15.4 / ZigBee Recon", passive=True)
+            s11_zigbee.run(dongle, eng_id)
+
+        if 12 in stages_requested:
+            from stages import s12_phy
+
+            stage_banner(12, "PHY / ISM Band Survey", passive=True)
+            s12_phy.run(dongle, eng_id)
+
+        if 14 in stages_requested:
+            from stages import s14_esb
+
+            stage_banner(14, "ESB Raw Channel Scan", passive=True)
+            s14_esb.run(dongle, eng_id)
+
+        if 15 in stages_requested:
+            from stages import s15_lorawan
+
+            stage_banner(15, "LoRaWAN Recon", passive=True)
+            s15_lorawan.run(dongle, eng_id)
+
+        if 16 in stages_requested:
+            from stages import s16_l2cap
+
+            stage_banner(16, "L2CAP CoC (capability gap)", passive=True)
+            s16_l2cap.run(dongle, eng_id)
+
+        if 13 in stages_requested and targets:
+            pairing_targets = [t for t in targets if t.connectable]
+            if pairing_targets:
+                stage_banner(13, "SMP Pairing Vulnerability Scan", passive=False)
+                if not config.ACTIVE_GATE or active_gate(
+                    13,
+                    f"Will attempt BLE pairing against {len(pairing_targets)} device(s) "
+                    "using 4 pairing modes (LESC/Legacy × Just Works/Bonding). "
+                    "Authorized targets only.",
+                ):
+                    from stages import s13_pairing
+                    for idx, t in enumerate(pairing_targets):
+                        s13_pairing.run(dongle, t, eng_id)
+                        if idx < len(pairing_targets) - 1:
+                            time.sleep(3.0)  # dongle recovery between targets
+            else:
+                log.info("Stage 13 skipped: no connectable targets.")
+
     except KeyboardInterrupt:
         log.info("Run aborted by user.")
     finally:
@@ -443,6 +506,59 @@ def main() -> None:
     gen_json(eng_id, args.name, args.location)
 
     _emit_summary(eng_id)
+
+
+def _stages_from_caps(caps) -> set[int]:
+    """Return the set of stage numbers supportable by this dongle's capabilities."""
+    stages: set[int] = set()
+    if caps.can_scan:           stages.add(1)               # passive BLE scan
+    if caps.can_sniff:          stages.add(2)               # connection intelligence
+    if caps.can_peripheral:     stages.add(3)               # identity clone
+    if caps.can_reactive_jam:   stages.add(4)               # reactive jamming
+    if caps.can_central:        stages.update({5, 7, 8, 13})  # GATT enum/fuzz/PoC, SMP
+    # S6 (MITM proxy) requires a second RF interface — always opt-in
+    # S9 (packet injection) is destructive — always opt-in
+    if caps.can_unifying:       stages.add(10)              # Logitech Unifying/MouseJack
+    if caps.can_zigbee:         stages.add(11)              # ZigBee/802.15.4 recon
+    if caps.can_phy:            stages.add(12)              # PHY ISM band survey
+    if caps.can_esb:            stages.add(14)              # ESB raw channel scan
+    if caps.can_lorawan:        stages.add(15)              # LoRaWAN recon
+    return stages
+
+
+def _print_auto_stages(stages: set[int]) -> None:
+    nums = ", ".join(str(s) for s in sorted(stages))
+    print(f"  Auto-selected stages : {nums}\n")
+
+
+def _warn_unsupported_stages(stages: set[int], caps) -> None:
+    """Log a warning for each explicitly requested stage the dongle cannot support."""
+    _STAGE_CAP: dict[int, tuple[str, str]] = {
+        1:  ("can_scan",        "BLE Scanner"),
+        2:  ("can_sniff",       "BLE Sniffer"),
+        3:  ("can_peripheral",  "BLE Peripheral"),
+        4:  ("can_reactive_jam","ReactiveJam"),
+        5:  ("can_central",     "BLE Central"),
+        6:  ("can_central",     "BLE Central"),
+        7:  ("can_central",     "BLE Central"),
+        8:  ("can_central",     "BLE Central"),
+        9:  ("can_central",     "BLE Central"),
+        10: ("can_unifying",    "Unifying CLI tools"),
+        11: ("can_zigbee",      "ZigBee module"),
+        12: ("can_phy",         "PHY module"),
+        13: ("can_central",     "BLE Central"),
+        14: ("can_esb",         "ESB module"),
+        15: ("can_lorawan",     "LoRaWAN module"),
+    }
+    for s in sorted(stages):
+        if s not in _STAGE_CAP:
+            continue
+        cap_name, cap_label = _STAGE_CAP[s]
+        if not getattr(caps, cap_name, True):
+            log.warning(
+                f"Stage {s} requires {cap_label} ({cap_name}=False) — "
+                "stage will skip itself at runtime."
+            )
 
 
 def _ask_inject_mode() -> str:

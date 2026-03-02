@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from time import time, sleep
+import subprocess
 import threading
 
 from whad.ble import UUID
@@ -8,6 +9,7 @@ from whad.ble.profile import (
     PrimaryService,
     Characteristic,
 )
+from whad.device import WhadDevice
 
 from core.dongle import WhadDongle
 from core.models import Target, Finding
@@ -59,6 +61,90 @@ def _attach_write_hooks(profile: GenericProfile, written_log: list[dict]) -> Non
         log.debug(f"[S3] Write hook attach failed: {exc}")
 
 
+def _run_spawn_relay(
+    dongle: WhadDongle,
+    target: Target,
+    engagement_id: str,
+) -> bool:
+    """Transparent GATT relay via wble-spawn.
+
+    Loads the S5-exported JSON profile and starts wble-spawn, which creates a
+    BLE peripheral that forwards every GATT operation to the real device.
+    Unlike the static clone, this relay mode requires the target to remain
+    connectable throughout the session.
+
+    Returns True if the relay ran successfully, False if it should fall back
+    to the static clone.
+    """
+    import shutil
+    if not shutil.which("wble-spawn"):
+        log.warning("[S3-spawn] wble-spawn not in PATH — falling back to static clone.")
+        return False
+
+    addr_safe = target.bd_address.replace(":", "")
+    profile_json = config.REPORT_DIR / f"s5_profile_{addr_safe}_{engagement_id}.json"
+    if not profile_json.exists():
+        log.warning(
+            f"[S3-spawn] No S5 profile found at {profile_json} — "
+            "run Stage 5 first. Falling back to static clone."
+        )
+        return False
+
+    log.info(
+        f"[S3-spawn] Starting transparent GATT relay for {target.bd_address} "
+        f"via {profile_json} ..."
+    )
+
+    t_start = time()
+    dongle.device.close()
+    try:
+        cmd = [
+            "wble-spawn",
+            "-i", config.INTERFACE,
+            "-p", str(profile_json),
+            target.bd_address,
+        ]
+        log.debug(f"[S3-spawn] cmd: {' '.join(cmd)}")
+        subprocess.run(cmd, timeout=config.CONN_SNIFF_DURATION)
+    except subprocess.TimeoutExpired:
+        log.info(f"[S3-spawn] Relay window ({config.CONN_SNIFF_DURATION}s) elapsed.")
+    except Exception as exc:
+        log.warning(f"[S3-spawn] wble-spawn error: {type(exc).__name__}: {exc}")
+    finally:
+        import time as _time
+        deadline = _time.time() + 15.0
+        while _time.time() < deadline:
+            try:
+                dongle.device = WhadDevice.create(config.INTERFACE)
+                break
+            except Exception:
+                _time.sleep(0.5)
+
+    duration = round(time() - t_start, 1)
+    finding = Finding(
+        type="ble_spawn_relay",
+        severity="info",
+        target_addr=target.bd_address,
+        description=(
+            f"wble-spawn transparent GATT relay ran against {target.bd_address} "
+            f"({target.name or 'unnamed'}) for {duration}s using profile {profile_json.name}. "
+            "All GATT operations from connecting centrals were forwarded to the real device."
+        ),
+        remediation=(
+            "Implement mutual authentication (LE Secure Connections with bonding). "
+            "Centrals must validate peripheral identity before exchanging application data."
+        ),
+        evidence={
+            "profile_json": str(profile_json),
+            "duration_seconds": duration,
+        },
+        engagement_id=engagement_id,
+    )
+    insert_finding(finding)
+    log.info(f"FINDING [info] ble_spawn_relay: {target.bd_address} — {duration}s relay")
+    return True
+
+
 def run(
     dongle: WhadDongle,
     target: Target,
@@ -69,6 +155,12 @@ def run(
         f"Cloning target {target.bd_address} "
         f"({target.name or 'unnamed'}, {target.device_class})"
     )
+
+    # Spawn relay mode: use wble-spawn for transparent GATT relay if configured.
+    if config.S3_SPAWN_MODE:
+        if _run_spawn_relay(dongle, target, engagement_id):
+            return
+        log.info("[S3-spawn] Falling back to static clone mode.")
 
     if gatt_profile:
         log.info(
@@ -117,12 +209,12 @@ def run(
 
     def _on_connect(conn_handle):
         now = datetime.now(timezone.utc)
-        log.info(
-            f"Central connected to clone! handle={conn_handle}"
-        )
+        log.info(f"[S3] Central connected to clone! handle={conn_handle}")
         connections_received.append(
             {
                 "conn_handle": conn_handle,
+                "connected_at": now.isoformat(),
+                # legacy key for summary display
                 "timestamp": now.isoformat(),
             }
         )
@@ -130,6 +222,29 @@ def run(
             original_on_connect(conn_handle)
 
     profile.on_connect = _on_connect
+
+    def _on_disconnect(conn_handle):
+        now = datetime.now(timezone.utc)
+        log.info(f"[S3] Central disconnected: handle={conn_handle}")
+        for session in reversed(connections_received):
+            if (
+                session.get("conn_handle") == conn_handle
+                and "disconnected_at" not in session
+            ):
+                session["disconnected_at"] = now.isoformat()
+                try:
+                    t0 = datetime.fromisoformat(session["connected_at"])
+                    dwell = (now - t0).total_seconds()
+                    session["dwell_seconds"] = round(dwell, 1)
+                    log.info(f"[S3] Session dwell: {dwell:.1f}s")
+                except Exception:
+                    pass
+                break
+
+    try:
+        profile.on_disconnect = _on_disconnect
+    except Exception as exc:
+        log.debug(f"[S3] on_disconnect hook not supported: {exc}")
 
     log.info(
         f"Starting rogue peripheral for {CLONE_DURATION}s. "
@@ -179,6 +294,9 @@ def run(
             "cloned_name": target.name,
             "device_class": target.device_class,
             "connections_received": connections_received,
+            "total_dwell_seconds": sum(
+                s.get("dwell_seconds", 0) for s in connections_received
+            ),
             "duration_seconds": CLONE_DURATION,
             "writes_captured": written_log,
         },
@@ -370,5 +488,6 @@ def _print_summary(
     print(f"  {'Centrals duped':<18}: {len(connections)}")
     if connections:
         for i, c in enumerate(connections):
-            print(f"    [{i + 1}] handle={c['conn_handle']}  at {c['timestamp']}")
+            dwell = f"  dwell={c['dwell_seconds']}s" if "dwell_seconds" in c else ""
+            print(f"    [{i + 1}] handle={c['conn_handle']}  at {c['timestamp']}{dwell}")
     print("─" * 76 + "\n")

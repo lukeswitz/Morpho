@@ -12,11 +12,33 @@ PCAP_DIR = Path("./pcaps")
 REPORT_DIR = Path("./reports")
 DB_PATH = Path("./findings.db")
 TARGET_FILTER = []
+RSSI_MIN_FILTER = 0     # dBm — 0 = no filter; e.g. -70 ignores devices weaker than -70 dBm
+S3_SPAWN_MODE   = False  # True = use wble-spawn transparent relay instead of static clone
+
+# Stage 13 — SMP Pairing Vulnerability Scanner
+S13_CONNECT_TIMEOUT = 15   # seconds to establish each test connection
+S13_PAIRING_TIMEOUT = 15   # seconds per pairing attempt (WHAD blocks internally)
 
 # Stage 10 — Logitech Unifying / MouseJack
 UNIFYING_SNIFF_SECS  = 30              # passive channel-scan window
 UNIFYING_INJECT_SECS = 10              # quick scan before inject to find devices
 MOUSEJACK_TEXT       = "MouseJack-PoC" # text injected in keyboard PoC
+
+# Stage 11 — IEEE 802.15.4 / ZigBee
+ZIGBEE_SCAN_SECS    = 60   # informational total across all channels
+ZIGBEE_PER_CH_SECS  = 3    # dwell per channel (16 channels × 3s = 48s)
+
+# Stage 12 — PHY / ISM Band Survey
+PHY_SWEEP_SECS    = 120  # informational total sweep budget
+PHY_PER_FREQ_SECS = 2    # dwell per frequency step (2 MHz spacing)
+
+# Stage 14 — ESB Raw Scanner
+ESB_SCAN_SECS    = 60    # total scan budget across all channels
+ESB_PER_CH_SECS  = 1     # packet wait timeout per channel
+
+# Stage 15 — LoRaWAN Recon
+LORAWAN_REGION    = "EU868"   # "EU868" or "US915"
+LORAWAN_SNIFF_SECS = 120      # total passive listen window
 
 HIGH_VALUE_PATTERNS = [
     r"lock",

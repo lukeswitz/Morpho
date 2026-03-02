@@ -14,7 +14,10 @@ import subprocess
 import threading
 from datetime import datetime, timezone
 
-from whad.ble.exceptions import ConnectionLostException
+from whad.ble.exceptions import (
+    ConnectionLostException,
+    PeripheralNotFound,
+)
 from whad.device import WhadDevice
 
 from core.dongle import WhadDongle
@@ -369,6 +372,17 @@ def _run_python_api(dongle: WhadDongle, target: Target, engagement_id: str) -> t
 
     log.info(f"Connected to {addr}. Discovering GATT profile...")
 
+    # Negotiate MTU — enables >20-byte characteristic payloads.
+    _negotiated_mtu: int | None = None
+    try:
+        central.set_mtu(247)
+        _negotiated_mtu = getattr(central, "mtu", None) or getattr(
+            central, "get_mtu", lambda: None
+        )()
+        log.info(f"[S5] MTU negotiated: {_negotiated_mtu}")
+    except Exception as exc:
+        log.debug(f"[S5] MTU negotiation (non-critical): {exc}")
+
     if not _discover_with_timeout(periph_dev, addr):
         try:
             periph_dev.disconnect()
@@ -382,6 +396,8 @@ def _run_python_api(dongle: WhadDongle, target: Target, engagement_id: str) -> t
     unauth_readable: list[GattCharacteristic] = []
     unauth_writable: list[GattCharacteristic] = []
     device_info: dict[str, str] = {}
+    if _negotiated_mtu:
+        device_info["negotiated_mtu"] = str(_negotiated_mtu)
 
     try:
         for service in dongle.periph_services(periph_dev):
@@ -409,17 +425,21 @@ def _run_python_api(dongle: WhadDongle, target: Target, engagement_id: str) -> t
                             uuid_int = _uuid_to_int(char_uuid)
                             if uuid_int in UUID_NAMES and gc.value_text:
                                 device_info[UUID_NAMES[uuid_int]] = gc.value_text
+                    except PeripheralNotFound:
+                        log.warning(f"[S5] Device lost during enumeration: {addr}")
+                        break
                     except Exception as exc:
-                        err = str(exc).lower()
-                        if any(
-                            kw in err
-                            for kw in ("authentication", "insufficient", "encrypt")
-                        ):
+                        _s = str(exc).lower()
+                        if "authentication" in _s or "authorization" in _s or "encryption" in _s:
                             gc.requires_auth = True
-                        log.debug(
-                            f"  {char_uuid} h={value_handle} "
-                            f"READ {type(exc).__name__}: {exc}"
-                        )
+                            log.info(
+                                f"[S5] Auth required for read: h=0x{value_handle:04X} {char_uuid}"
+                            )
+                        else:
+                            log.debug(
+                                f"  {char_uuid} h={value_handle} "
+                                f"READ {type(exc).__name__}: {exc}"
+                            )
 
                 if "write" in props or "write_no_resp" in props:
                     try:
@@ -432,17 +452,21 @@ def _run_python_api(dongle: WhadDongle, target: Target, engagement_id: str) -> t
                         gc.requires_enc = False
                         if gc not in unauth_writable:
                             unauth_writable.append(gc)
+                    except PeripheralNotFound:
+                        log.warning(f"[S5] Device lost during write scan: {addr}")
+                        break
                     except Exception as exc:
-                        err = str(exc).lower()
-                        if any(
-                            kw in err
-                            for kw in ("authentication", "insufficient", "encrypt")
-                        ):
+                        _s = str(exc).lower()
+                        if "authentication" in _s or "authorization" in _s or "encryption" in _s:
                             gc.requires_enc = True
-                        log.debug(
-                            f"  {char_uuid} h={value_handle} "
-                            f"WRITE {type(exc).__name__}: {exc}"
-                        )
+                            log.info(
+                                f"[S5] Auth required for write: h=0x{value_handle:04X} {char_uuid}"
+                            )
+                        else:
+                            log.debug(
+                                f"  {char_uuid} h={value_handle} "
+                                f"WRITE {type(exc).__name__}: {exc}"
+                            )
 
                 chars.append(gc)
 
@@ -451,6 +475,13 @@ def _run_python_api(dongle: WhadDongle, target: Target, engagement_id: str) -> t
     except Exception as exc:
         log.error(
             f"GATT enumeration error on {addr}: {type(exc).__name__}: {exc}"
+        )
+
+    # --- Inline auth escalation (LESC Just Works on same connection) ---
+    auth_blocked = [c for c in chars if c.requires_auth or c.requires_enc]
+    if auth_blocked and periph_dev is not None:
+        _try_inline_auth_escalation(
+            periph_dev, auth_blocked, addr, engagement_id, target,
         )
 
     # --- Notification harvest (within the same open connection) ---
@@ -515,6 +546,127 @@ def _run_python_api(dongle: WhadDongle, target: Target, engagement_id: str) -> t
     return [c.value_handle for c in unauth_writable], profile
 
 
+def _try_inline_auth_escalation(
+    periph_dev,
+    auth_blocked: list[GattCharacteristic],
+    addr: str,
+    engagement_id: str,
+    target: Target,
+) -> None:
+    """Attempt LESC Just Works pairing on the open connection when auth-blocked chars exist.
+
+    If pairing succeeds, retries blocked reads/writes. Records
+    gatt_auth_escalation_success (high) if any previously-locked char becomes accessible.
+    WHAD's pairing() can block indefinitely — uses a daemon thread with a hard timeout.
+    """
+    try:
+        from whad.ble.stack.smp.parameters import Pairing as _Pairing
+    except ImportError:
+        log.debug("[S5] SMP Pairing not importable — inline auth escalation skipped")
+        return
+
+    log.info(
+        f"[S5] {len(auth_blocked)} auth-blocked char(s) on {addr} — "
+        "attempting inline LESC Just Works pairing ..."
+    )
+
+    pairing_result: list[bool] = [False]
+    pairing_done = threading.Event()
+
+    def _pair() -> None:
+        try:
+            pairing_result[0] = periph_dev.pairing(
+                pairing=_Pairing(lesc=True, mitm=False, bonding=False)
+            )
+        except Exception as exc:
+            log.debug(f"[S5] Inline pairing exception: {type(exc).__name__}: {exc}")
+        finally:
+            pairing_done.set()
+
+    t = threading.Thread(target=_pair, daemon=True)
+    t.start()
+    pairing_done.wait(timeout=15.0)
+
+    if not pairing_result[0]:
+        log.info("[S5] Inline LESC Just Works pairing rejected or timed out.")
+        return
+
+    log.info("[S5] Inline LESC pairing accepted — retrying blocked characteristics ...")
+    unlocked_read: list[dict] = []
+    unlocked_write: list[dict] = []
+
+    for gc in auth_blocked:
+        if gc.requires_auth and "read" in gc.properties:
+            try:
+                raw_val = periph_dev.read(gc.value_handle)
+                if raw_val is not None:
+                    _decode_char_value(gc, raw_val.hex())
+                    gc.requires_auth = False
+                    unlocked_read.append({
+                        "uuid": gc.uuid,
+                        "uuid_name": UUID_NAMES.get(_uuid_to_int(gc.uuid), ""),
+                        "handle": gc.value_handle,
+                        "value_hex": gc.value_hex,
+                        "value_text": gc.value_text,
+                    })
+                    log.info(
+                        f"[S5] Auth escalation: read unlocked h=0x{gc.value_handle:04X} "
+                        f"{gc.uuid} → {gc.value_text or gc.value_hex}"
+                    )
+            except Exception as exc:
+                log.debug(f"[S5] Post-pairing read h={gc.value_handle}: {exc}")
+
+        if gc.requires_enc and ("write" in gc.properties or "write_no_resp" in gc.properties):
+            try:
+                no_resp = "write_no_resp" in gc.properties
+                if no_resp:
+                    periph_dev.write_command(gc.value_handle, b"\x00")
+                else:
+                    periph_dev.write(gc.value_handle, b"\x00")
+                gc.requires_enc = False
+                unlocked_write.append({
+                    "uuid": gc.uuid,
+                    "uuid_name": UUID_NAMES.get(_uuid_to_int(gc.uuid), ""),
+                    "handle": gc.value_handle,
+                })
+                log.info(
+                    f"[S5] Auth escalation: write unlocked h=0x{gc.value_handle:04X} {gc.uuid}"
+                )
+            except Exception as exc:
+                log.debug(f"[S5] Post-pairing write h={gc.value_handle}: {exc}")
+
+    if unlocked_read or unlocked_write:
+        insert_finding(Finding(
+            type="gatt_auth_escalation_success",
+            severity="high",
+            target_addr=addr,
+            description=(
+                f"Device {addr} ({target.name or 'unnamed'}) accepted LESC Just Works "
+                f"pairing without MITM protection, granting access to "
+                f"{len(unlocked_read)} previously-locked read(s) and "
+                f"{len(unlocked_write)} previously-locked write(s)."
+            ),
+            remediation=(
+                "Require MITM-protected pairing (Numeric Comparison or Passkey Entry) "
+                "for characteristics that restrict unauthenticated access. "
+                "Enforce SMP security level >= 3 for all sensitive characteristics."
+            ),
+            evidence={
+                "unlocked_read": unlocked_read,
+                "unlocked_write": unlocked_write,
+                "pairing_mode": "LESC Just Works (no MITM)",
+            },
+            pcap_path=None,
+            engagement_id=engagement_id,
+        ))
+        log.info(
+            f"FINDING [high] gatt_auth_escalation_success: {addr} — "
+            f"{len(unlocked_read)}R / {len(unlocked_write)}W unlocked via inline pairing"
+        )
+    else:
+        log.info("[S5] Inline pairing succeeded but no previously-blocked chars were unlocked.")
+
+
 def _harvest_notifications(
     periph_dev,
     notify_chars: list[GattCharacteristic],
@@ -560,6 +712,7 @@ def _harvest_notifications(
         return _cb
 
     subscribed = 0
+    subscribed_objs: list = []   # track for cleanup after harvest
     for gc in notify_chars[:8]:   # cap at 8 handles
         uuid_name = UUID_NAMES.get(_uuid_to_int(gc.uuid), "")
         try:
@@ -573,6 +726,7 @@ def _harvest_notifications(
                     callback=_make_cb(gc.uuid, uuid_name),
                 )
                 subscribed += 1
+                subscribed_objs.append(char_obj)
                 log.debug(f"  Subscribed to {gc.uuid} h={gc.value_handle}")
         except Exception as exc:
             log.debug(
@@ -601,6 +755,14 @@ def _harvest_notifications(
     log.info(
         f"  Notification harvest complete: {len(collected)} update(s) received"
     )
+
+    # Unsubscribe to prevent stale callbacks interfering with later stages.
+    for char_obj in subscribed_objs:
+        try:
+            char_obj.unsubscribe()
+        except Exception:
+            pass
+
     return collected
 
 

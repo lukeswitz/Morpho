@@ -47,6 +47,10 @@ class DongleCaps:
     can_peripheral:     bool = False  # Peripheral connector works
     can_unifying:       bool = False  # Logitech Unifying (ESB) domain available
     can_phy:            bool = False  # PHY raw modulation domain available
+    can_esb:            bool = False  # Enhanced ShockBurst raw domain (non-Logitech)
+    can_lorawan:        bool = False  # LoRaWAN domain (requires LoRa radio)
+    can_zigbee:         bool = False  # IEEE 802.15.4 / ZigBee domain available
+    can_send_pdu:       bool = False  # Central.enable_synchronous + send_pdu available
     firmware_version:   str | None = None
     device_type:        str = "unknown"  # "butterfly" | "hci" | "unknown"
 
@@ -65,6 +69,10 @@ class DongleCaps:
             f"  Peripheral      : {tick(self.can_peripheral)}",
             f"  Unifying (ESB)  : {tick(self.can_unifying)}",
             f"  PHY (ISM band)  : {tick(self.can_phy)}",
+            f"  ESB (raw)       : {tick(self.can_esb)}",
+            f"  LoRaWAN         : {tick(self.can_lorawan)}",
+            f"  ZigBee (802.15.4): {tick(self.can_zigbee)}",
+            f"  SendPDU (raw ATT): {tick(self.can_send_pdu)}",
         ]
 
 
@@ -164,14 +172,6 @@ class WhadDongle:
         elif "hci" in self.interface.lower():
             caps.device_type = "hci"
 
-        # Try to read firmware version from device info
-        try:
-            info = self.device.get_domain_info()
-            if info and hasattr(info, "fw_version"):
-                caps.firmware_version = str(info.fw_version)
-        except Exception:
-            pass
-
         # --- Probes 1–6: class-level checks only — NO instantiation ---
         # Instantiating a connector and calling start()/stop() registers it
         # with the WhadDevice and causes WhadDeviceTimeout on ButteRFly.
@@ -258,6 +258,60 @@ class WhadDongle:
         except ImportError as exc:
             log.warning(f"Cap probe: PHY not available ({exc})")
 
+        # --- Probe 9: ESB (Enhanced ShockBurst) raw domain ---
+        try:
+            from whad.esb import Scanner as _EsbScanner  # noqa: F401
+            caps.can_esb = True
+            log.debug("Cap probe: ESB module importable (runtime compatibility unverified)")
+        except ImportError as exc:
+            log.warning(f"Cap probe: ESB not available ({exc})")
+
+        # --- Probe 10: LoRaWAN domain ---
+        # LoRaWAN requires a dedicated LoRa transceiver (SX1276/SX1278 or equivalent).
+        # The ButteRFly (nRF52840) has no LoRa radio — the Python module may be importable
+        # on the VM, but the hardware cannot drive it. Skip probe for butterfly devices.
+        if caps.device_type == "butterfly":
+            log.warning(
+                "Cap probe: LoRaWAN skipped — ButteRFly (nRF52840) has no LoRa transceiver. "
+                "can_lorawan=False."
+            )
+        else:
+            _lora_found = False
+            for _lora_path in ("whad.lorawan", "whad.lorawan.gateway", "whad.lorawan.connector"):
+                try:
+                    import importlib as _il
+                    _il.import_module(_lora_path)
+                    caps.can_lorawan = True
+                    log.debug(f"Cap probe: LoRaWAN OK ({_lora_path})")
+                    _lora_found = True
+                    break
+                except ImportError:
+                    continue
+            if not _lora_found:
+                log.warning("Cap probe: LoRaWAN not available (no whad.lorawan module found)")
+
+        # --- Probe 11: ZigBee / IEEE 802.15.4 domain ---
+        try:
+            from whad.zigbee import Sniffer as _ZigbeeSniffer  # noqa: F401
+            caps.can_zigbee = True
+            log.debug("Cap probe: ZigBee OK")
+        except ImportError as exc:
+            log.warning(f"Cap probe: ZigBee not available ({exc})")
+
+        # --- Probe 12: send_pdu availability (raw ATT PDU injection from Central) ---
+        try:
+            from whad.ble import Central as _CentralPdu  # noqa: F401
+            caps.can_send_pdu = (
+                callable(getattr(_CentralPdu, "enable_synchronous", None))
+                and callable(getattr(_CentralPdu, "send_pdu", None))
+            )
+            if caps.can_send_pdu:
+                log.debug("Cap probe: send_pdu OK (enable_synchronous + send_pdu on Central)")
+            else:
+                log.warning("Cap probe: send_pdu not available on Central class")
+        except ImportError:
+            pass
+
         log.info("Capability probe complete.")
 
     # ------------------------------------------------------------------
@@ -280,7 +334,7 @@ class WhadDongle:
         """Return a configured Scanner. Asserts can_scan."""
         from whad.ble import Scanner
         self.assert_cap("can_scan")
-        s = Scanner(self.device)
+        s = self._create_connector(Scanner)
         self._whad_log("Scanner created")
         return s
 
@@ -288,7 +342,7 @@ class WhadDongle:
         """Return a configured Sniffer. Asserts can_sniff."""
         from whad.ble import Sniffer
         self.assert_cap("can_sniff")
-        s = Sniffer(self.device)
+        s = self._create_connector(Sniffer)
         self._whad_log("Sniffer created")
         return s
 
@@ -296,7 +350,7 @@ class WhadDongle:
         """Return a configured Central. Asserts can_central."""
         from whad.ble import Central
         self.assert_cap("can_central")
-        c = Central(self.device)
+        c = self._create_connector(Central)
         self._whad_log("Central created")
         return c
 
@@ -305,14 +359,14 @@ class WhadDongle:
         from whad.ble import Peripheral
         from whad.ble.profile import GenericProfile
         self.assert_cap("can_peripheral")
-        p = Peripheral(self.device, profile=profile or GenericProfile())
+        p = self._create_connector(Peripheral, profile or GenericProfile())
         self._whad_log("Peripheral created")
         return p
 
     def ble_connector(self):
         """Return a raw BLE base connector (used by s4_jam)."""
         from whad.ble.connector import BLE
-        c = BLE(self.device)
+        c = self._create_connector(BLE)
         self._whad_log("BLE connector created")
         return c
 
@@ -448,6 +502,24 @@ class WhadDongle:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _create_connector(self, connector_cls, *args):
+        """Create a BLE connector without triggering a second device reset.
+
+        BLE connector __init__ calls device.open() → device.reset(). open()
+        itself is required — it starts the I/O threads and sets self.__opened=True
+        (WhadDevice.create() does NOT call open(); the device is not yet open).
+        Only the reset() inside open() fails: it sends a Reset command and waits
+        for DeviceReady, but the ButteRFly firmware does not re-emit DeviceReady
+        after boot. Patching reset() to a no-op lets open() complete normally
+        (threads started, opened=True) and allows discover() to succeed.
+        """
+        orig_reset = self.device.reset
+        self.device.reset = lambda: None
+        try:
+            return connector_cls(self.device, *args)
+        finally:
+            self.device.reset = orig_reset
 
     def _whad_log(self, msg: str) -> None:
         if self._verbose:

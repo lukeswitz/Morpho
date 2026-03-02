@@ -1,0 +1,394 @@
+"""
+Stage 15 — LoRaWAN Recon
+
+Passive sniff of LoRaWAN Join Requests and data uplinks on the configured
+regional frequency plan. Records DevEUI, AppEUI, and DevNonce from any Join
+Requests observed.
+
+Hardware note: The ButteRFly (nRF52840) dongle does NOT include a LoRa
+transceiver. This stage is functional only with WHAD dongles that include
+SX1276/SX1278 or equivalent LoRa radio. The stage probes for capability at
+startup and exits gracefully if the hardware or Python module is absent.
+
+Findings:
+  - lorawan_join_captured     (info)   — Join Request observed; plaintext DevEUI
+  - lorawan_data_frames       (info)   — Data uplinks observed; payload opacity unknown
+"""
+
+from __future__ import annotations
+
+import time
+
+from core.dongle import WhadDongle
+from core.models import Finding
+from core.db import insert_finding
+from core.logger import get_logger
+import config
+
+log = get_logger("s15_lorawan")
+
+# Regional channel plans (centre frequencies, MHz)
+_REGION_FREQS: dict[str, list[float]] = {
+    "EU868": [868.1, 868.3, 868.5, 867.1, 867.3, 867.5, 867.7, 867.9],
+    "US915": [902.3, 902.5, 902.7, 902.9, 903.1, 903.3, 903.5, 903.7],
+}
+
+# Try all plausible WHAD LoRaWAN import paths
+_LoraGateway = None
+_LORAWAN_AVAILABLE = False
+for _lora_path in ("whad.lorawan", "whad.lorawan.gateway"):
+    try:
+        import importlib as _il
+        _lora_pkg = _il.import_module(_lora_path)
+        _LoraGateway = getattr(_lora_pkg, "Gateway", None)
+        if _LoraGateway is not None:
+            _LORAWAN_AVAILABLE = True
+            break
+    except ImportError:
+        continue
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+def run(dongle: WhadDongle, engagement_id: str) -> None:
+    if not _LORAWAN_AVAILABLE:
+        log.warning(
+            "[S15] whad.lorawan module not available. "
+            "LoRaWAN recon requires WHAD with LoRaWAN support and a LoRa radio. "
+            "Stage skipped."
+        )
+        return
+
+    if not dongle.caps.can_lorawan:
+        log.warning(
+            "[S15] LoRaWAN capability not confirmed on this dongle. "
+            "Requires a LoRa-capable radio (SX1276/SX1278). "
+            "The ButteRFly nRF52840 dongle does not include a LoRa transceiver. "
+            "Stage skipped."
+        )
+        return
+
+    region = config.LORAWAN_REGION
+    freqs = _REGION_FREQS.get(region, _REGION_FREQS["EU868"])
+    log.info(
+        f"[S15] LoRaWAN recon — region={region} "
+        f"({len(freqs)} channels, {config.LORAWAN_SNIFF_SECS}s scan) ..."
+    )
+
+    join_requests: list[dict] = []
+    data_frames:   list[dict] = []
+
+    try:
+        gw = _LoraGateway(dongle.device)
+    except Exception as exc:
+        log.warning(f"[S15] Could not initialise LoRaWAN Gateway: {type(exc).__name__}: {exc}")
+        return
+
+    deadline = time.time() + config.LORAWAN_SNIFF_SECS
+    try:
+        gw.start()
+        log.info("[S15] LoRaWAN listener started ...")
+
+        while time.time() < deadline:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            try:
+                pkt = gw.wait_packet(timeout=min(2.0, remaining))
+            except AttributeError:
+                # wait_packet not available — try iterator
+                try:
+                    for pkt in gw.sniff(timeout=min(5.0, remaining)):
+                        _classify_pkt(pkt, join_requests, data_frames)
+                except Exception as exc:
+                    log.debug(f"[S15] sniff() error: {exc}")
+                break
+            except Exception as exc:
+                log.debug(f"[S15] wait_packet error: {exc}")
+                break
+
+            if pkt is not None:
+                _classify_pkt(pkt, join_requests, data_frames)
+
+    except Exception as exc:
+        log.warning(f"[S15] LoRaWAN scan error: {type(exc).__name__}: {exc}")
+    finally:
+        try:
+            gw.stop()
+        except Exception:
+            pass
+
+    _record_findings(engagement_id, join_requests, data_frames)
+    _print_summary(region, join_requests, data_frames)
+
+    if join_requests:
+        _test_join_replay(dongle, join_requests[0], engagement_id)
+
+
+# ── Join Request replay test ──────────────────────────────────────────────────
+
+def _test_join_replay(dongle, join_request: dict, engagement_id: str) -> None:
+    """Replay a captured Join Request to test DevNonce uniqueness enforcement.
+
+    Transmits the raw Join Request bytes back via the LoRa gateway. A Join Accept
+    response (MType=1) within 5s confirms the Network Server does NOT enforce
+    DevNonce replay protection — a LoRaWAN 1.0.x vulnerability.
+
+    Records lorawan_replay_accepted (high) or lorawan_replay_attempted (info)
+    depending on whether a Join Accept is received.
+    """
+    raw_hex = join_request.get("raw_hex", "")
+    if not raw_hex:
+        log.debug("[S15] No raw_hex in captured Join Request — replay skipped")
+        return
+
+    log.info("[S15] Replaying captured Join Request to test DevNonce uniqueness ...")
+
+    try:
+        gw = _LoraGateway(dongle.device)
+    except Exception as exc:
+        log.warning(f"[S15] Replay: cannot initialise gateway: {exc}")
+        return
+
+    replay_sent = False
+    replay_accepted = False
+    response_hex: str | None = None
+
+    try:
+        gw.start()
+        raw_bytes = bytes.fromhex(raw_hex)
+
+        # Try TX methods in order of likelihood
+        for _tx_name in ("send", "transmit", "inject"):
+            fn = getattr(gw, _tx_name, None)
+            if fn is None:
+                continue
+            try:
+                fn(raw_bytes)
+                replay_sent = True
+                log.info(f"[S15] Join Request replayed via gw.{_tx_name}()")
+                break
+            except Exception as exc:
+                log.debug(f"[S15] gw.{_tx_name}() failed: {exc}")
+
+        if not replay_sent:
+            log.warning(
+                "[S15] LoRa gateway TX method not found (no send/transmit/inject). "
+                "This WHAD version or hardware may not support LoRa TX. "
+                "Replay test skipped."
+            )
+            return
+
+        # Wait up to 5s for a Join Accept response (MType=1)
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            remaining = deadline - time.time()
+            try:
+                pkt = gw.wait_packet(timeout=min(1.0, remaining))
+            except AttributeError:
+                break
+            except Exception:
+                break
+            if pkt is None:
+                continue
+            mtype = getattr(pkt, "MType", getattr(pkt, "mtype", None))
+            if mtype in (1, "JoinAccept", "JOIN_ACCEPT"):
+                replay_accepted = True
+                response_hex = _safe_hex(pkt)
+                log.info("[S15] JOIN ACCEPT received after replay — DevNonce replay NOT protected!")
+                break
+
+    except Exception as exc:
+        log.warning(f"[S15] Replay test error: {type(exc).__name__}: {exc}")
+    finally:
+        try:
+            gw.stop()
+        except Exception:
+            pass
+
+    if replay_accepted:
+        insert_finding(Finding(
+            type="lorawan_replay_accepted",
+            severity="high",
+            target_addr="lorawan",
+            description=(
+                "LoRaWAN Network Server accepted a replayed Join Request containing a "
+                "previously-observed DevNonce. DevNonce uniqueness is NOT enforced. "
+                "An attacker can replay captured Join Requests to obtain a valid network session."
+            ),
+            remediation=(
+                "Enforce DevNonce uniqueness tracking at the Network Server (required "
+                "by LoRaWAN 1.0.4+). Upgrade to LoRaWAN 1.1 where JoinNonce provides "
+                "server-side replay protection. Implement per-device nonce blocklists."
+            ),
+            evidence={
+                "replayed_dev_eui": join_request.get("dev_eui"),
+                "replayed_app_eui": join_request.get("app_eui"),
+                "replayed_dev_nonce": join_request.get("dev_nonce"),
+                "join_accept_hex": response_hex,
+            },
+            pcap_path=None,
+            engagement_id=engagement_id,
+        ))
+        log.info("FINDING [high] lorawan_replay_accepted: DevNonce replay not protected")
+    elif replay_sent:
+        insert_finding(Finding(
+            type="lorawan_replay_attempted",
+            severity="info",
+            target_addr="lorawan",
+            description=(
+                "LoRaWAN Join Request replayed successfully (TX confirmed). "
+                "No Join Accept received within 5s. "
+                "Network Server may enforce DevNonce uniqueness, or the device "
+                "joins a private network not reachable by the sniffer."
+            ),
+            remediation=(
+                "Confirm DevNonce uniqueness enforcement is active at the Network Server. "
+                "Run replay test from within the network's RF coverage to verify."
+            ),
+            evidence={
+                "replayed_dev_eui": join_request.get("dev_eui"),
+                "replayed_dev_nonce": join_request.get("dev_nonce"),
+            },
+            pcap_path=None,
+            engagement_id=engagement_id,
+        ))
+        log.info("FINDING [info] lorawan_replay_attempted: no Join Accept received")
+
+
+# ── Packet classification ─────────────────────────────────────────────────────
+
+def _classify_pkt(pkt, join_requests: list, data_frames: list) -> None:
+    """Dispatch received LoRaWAN packet to the appropriate bucket."""
+    try:
+        mtype = getattr(pkt, "MType", getattr(pkt, "mtype", None))
+        if mtype is None:
+            return
+
+        # MType 0 = Join Request
+        if mtype in (0, "JoinRequest", "JOIN_REQUEST"):
+            entry = {
+                "dev_eui":   _hex_attr(pkt, "DevEUI", "dev_eui", "deveui"),
+                "app_eui":   _hex_attr(pkt, "AppEUI", "app_eui", "joineui", "JoinEUI"),
+                "dev_nonce": _hex_attr(pkt, "DevNonce", "dev_nonce"),
+                "raw_hex":   _safe_hex(pkt),
+            }
+            join_requests.append(entry)
+            log.info(
+                f"[S15] Join Request: DevEUI={entry['dev_eui']} "
+                f"AppEUI={entry['app_eui']} Nonce={entry['dev_nonce']}"
+            )
+
+        # MType 2 = Unconfirmed Up, 4 = Confirmed Up
+        elif mtype in (2, 4, "UnconfirmedDataUp", "ConfirmedDataUp"):
+            entry = {
+                "dev_addr": _hex_attr(pkt, "DevAddr", "dev_addr"),
+                "fcnt":     str(getattr(pkt, "FCnt", getattr(pkt, "fcnt", "?"))),
+                "raw_hex":  _safe_hex(pkt)[:32],
+            }
+            data_frames.append(entry)
+            log.info(
+                f"[S15] Data uplink: DevAddr={entry['dev_addr']} FCnt={entry['fcnt']}"
+            )
+    except Exception as exc:
+        log.debug(f"[S15] Packet classify error: {exc}")
+
+
+def _hex_attr(pkt, *names: str) -> str | None:
+    """Return first matching attribute as hex string."""
+    for name in names:
+        val = getattr(pkt, name, None)
+        if val is not None:
+            try:
+                return bytes(val).hex()
+            except Exception:
+                return str(val)
+    return None
+
+
+def _safe_hex(pkt) -> str:
+    try:
+        return bytes(pkt).hex()
+    except Exception:
+        return ""
+
+
+# ── Findings ──────────────────────────────────────────────────────────────────
+
+def _record_findings(
+    engagement_id: str,
+    join_requests: list[dict],
+    data_frames: list[dict],
+) -> None:
+    if join_requests:
+        insert_finding(Finding(
+            type="lorawan_join_captured",
+            severity="info",
+            target_addr="lorawan",
+            description=(
+                f"{len(join_requests)} LoRaWAN Join Request(s) captured. "
+                "DevEUI, AppEUI, and DevNonce are transmitted in plaintext (LoRaWAN spec). "
+                "DevNonce uniqueness enforcement by the network server determines replay risk."
+            ),
+            remediation=(
+                "Ensure the LoRaWAN Network Server (LNS) enforces DevNonce uniqueness "
+                "to prevent Join Request replay attacks (required by LoRaWAN 1.0.4+). "
+                "Prefer LoRaWAN 1.1 which includes JoinNonce from the server side. "
+                "Rotate AppKey if device compromise is suspected."
+            ),
+            evidence={"join_requests": join_requests},
+            pcap_path=None,
+            engagement_id=engagement_id,
+        ))
+        log.info(f"FINDING [info] lorawan_join_captured: {len(join_requests)} request(s)")
+
+    if data_frames:
+        insert_finding(Finding(
+            type="lorawan_data_frames",
+            severity="info",
+            target_addr="lorawan",
+            description=(
+                f"{len(data_frames)} LoRaWAN data uplink(s) observed. "
+                "Payload encryption depends on application layer configuration "
+                "(ABP mode without AppSKey would expose plaintext)."
+            ),
+            remediation=(
+                "Ensure LoRaWAN payloads are encrypted with AppSKey at the application layer. "
+                "Monitor for anomalous frame counter patterns. "
+                "Implement end-to-end encryption beyond LoRaWAN transport."
+            ),
+            evidence={"data_frames": data_frames[:10]},
+            pcap_path=None,
+            engagement_id=engagement_id,
+        ))
+        log.info(f"FINDING [info] lorawan_data_frames: {len(data_frames)} frame(s)")
+
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+
+def _print_summary(
+    region: str,
+    join_requests: list[dict],
+    data_frames: list[dict],
+) -> None:
+    print("\n" + "─" * 76)
+    print("  STAGE 15 SUMMARY -- LoRaWAN Recon")
+    print("─" * 76)
+    print(f"  {'Region':<20}: {region}")
+    print(f"  {'Join Requests':<20}: {len(join_requests)}")
+    print(f"  {'Data uplinks':<20}: {len(data_frames)}")
+
+    if join_requests:
+        print()
+        print("  Join Requests captured:")
+        for jr in join_requests[:5]:
+            print(
+                f"    DevEUI={jr['dev_eui']}  "
+                f"AppEUI={jr['app_eui']}  "
+                f"Nonce={jr['dev_nonce']}"
+            )
+
+    if not join_requests and not data_frames:
+        print("  Result: no LoRaWAN traffic observed on configured channels.")
+
+    print("─" * 76 + "\n")
