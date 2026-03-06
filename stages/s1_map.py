@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import threading
 
 from scapy.layers.bluetooth4LE import (
     BTLE_ADV,
@@ -172,8 +173,13 @@ def _parse_ad_records(raw_bytes: bytes) -> dict:
     return result
 
 
-def run(dongle: WhadDongle, engagement_id: str) -> list[Target]:
+def run(
+    dongle: WhadDongle,
+    engagement_id: str,
+    ubertooth_dongle: "WhadDongle | None" = None,
+) -> list[Target]:
     targets: dict[str, Target] = {}
+    _lock = threading.Lock()  # protects `targets` dict for parallel writes
 
     log.info(
         f"Starting passive scan for {config.SCAN_DURATION}s "
@@ -182,6 +188,11 @@ def run(dongle: WhadDongle, engagement_id: str) -> list[Target]:
     log.info("Listening on advertising channels 37, 38, 39...")
     if config.RSSI_MIN_FILTER:
         log.info(f"[S1] RSSI filter: ignoring devices below {config.RSSI_MIN_FILTER} dBm")
+    if ubertooth_dongle:
+        log.info(
+            f"[S1] Ubertooth One [{ubertooth_dongle.interface}] running as "
+            "parallel passive sniffer — extended channel coverage."
+        )
 
     _monitor = None
     scanner = dongle.scanner()
@@ -200,6 +211,16 @@ def run(dongle: WhadDongle, engagement_id: str) -> list[Target]:
             )
 
     scanner.start()
+
+    # Start Ubertooth parallel scan thread if available.
+    _ubertooth_thread: threading.Thread | None = None
+    if ubertooth_dongle is not None and ubertooth_dongle.caps.can_scan:
+        _ubertooth_thread = threading.Thread(
+            target=_ubertooth_scan_worker,
+            args=(ubertooth_dongle, targets, _lock, engagement_id, config.SCAN_DURATION),
+            daemon=True,
+        )
+        _ubertooth_thread.start()
 
     try:
         for pkt in dongle.sniff_iter(scanner, total_duration=config.SCAN_DURATION):
@@ -322,11 +343,84 @@ def run(dongle: WhadDongle, engagement_id: str) -> list[Target]:
         except Exception:
             pass
 
-    result = sorted(
-        targets.values(), key=lambda x: x.risk_score, reverse=True
-    )
+    if _ubertooth_thread is not None:
+        _ubertooth_thread.join(timeout=5.0)
+
+    with _lock:
+        result = sorted(
+            targets.values(), key=lambda x: x.risk_score, reverse=True
+        )
     _print_summary(result)
     return result
+
+
+def _ubertooth_scan_worker(
+    dongle: "WhadDongle",
+    targets: dict,
+    lock: threading.Lock,
+    engagement_id: str,
+    duration: float,
+) -> None:
+    """Background thread: scan with Ubertooth One and merge into shared targets."""
+    try:
+        ub_scanner = dongle.scanner()
+        ub_scanner.start()
+        for pkt in dongle.sniff_iter(ub_scanner, total_duration=duration):
+            now = datetime.now(timezone.utc)
+            try:
+                bd_addr = _extract_adv_addr(pkt)
+                if bd_addr is None:
+                    continue
+                bd_addr = bd_addr.upper()
+                if config.RSSI_MIN_FILTER:
+                    rssi = 0
+                    meta = getattr(pkt, "metadata", None)
+                    if meta is not None:
+                        rssi = getattr(meta, "rssi", 0) or 0
+                    if rssi < config.RSSI_MIN_FILTER:
+                        continue
+                if config.TARGET_FILTER and bd_addr not in config.TARGET_FILTER:
+                    continue
+                with lock:
+                    if bd_addr not in targets:
+                        raw_ad = _raw_ad_bytes(pkt)
+                        ad = _parse_ad_records(raw_ad)
+                        pdu = _pdu_type(pkt)
+                        connectable = pdu in ("ADV_IND", "ADV_DIRECT_IND")
+                        t = Target(
+                            bd_address=bd_addr,
+                            address_type=_addr_type_label(pkt, bd_addr),
+                            adv_type=pdu,
+                            name=ad["name"],
+                            manufacturer=None,
+                            company_id=ad["company_id"],
+                            services=ad["services"],
+                            tx_power=ad["tx_power"],
+                            rssi_samples=[],
+                            rssi_avg=0.0,
+                            device_class="unknown",
+                            connectable=connectable,
+                            first_seen=now,
+                            last_seen=now,
+                            raw_adv_records=[raw_ad] if raw_ad else [],
+                            risk_score=0,
+                            engagement_id=engagement_id,
+                            channel=_extract_channel(pkt),
+                        )
+                        from classify.fingerprint import classify_device, compute_risk_score
+                        t.device_class = classify_device(t)
+                        t.risk_score = compute_risk_score(t)
+                        targets[bd_addr] = t
+                        log.info(f"[S1][ubertooth] New device: {bd_addr} ({t.device_class})")
+            except Exception as exc:
+                log.debug(f"[S1][ubertooth] Packet error: {exc}")
+    except Exception as exc:
+        log.debug(f"[S1][ubertooth] Scanner error: {type(exc).__name__}: {exc}")
+    finally:
+        try:
+            ub_scanner.stop()
+        except Exception:
+            pass
 
 
 def _log_new_target(t: Target) -> None:

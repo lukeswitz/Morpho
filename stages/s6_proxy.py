@@ -50,15 +50,23 @@ def run(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
     live_wireshark = _ask_wireshark()
 
     wireshark_flag = "-w" if live_wireshark else ""
+    link_layer_mode = _ask_link_layer()
+    ll_flag = "--link-layer" if link_layer_mode else ""
     cmd = (
         f"wble-proxy"
         f" -i {config.INTERFACE}"
         f" -p {config.PROXY_INTERFACE}"
         f" {rand_flag}"
         f" {wireshark_flag}"
+        f" {ll_flag}"
         f" -o {_pcap}"
         f" {addr}"
     )
+    if link_layer_mode:
+        log.info(
+            "[S6] Link-layer mode active: all L2CAP PDUs (not just GATT) "
+            "will be intercepted. Invisible to GATT-level detection."
+        )
 
     log.info(f"[S6] Starting MITM proxy against {addr}")
     log.info(f"[S6] Attack interface : {config.INTERFACE}")
@@ -114,6 +122,21 @@ def run(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
         connections_accepted=connections_accepted,
     )
     _print_summary(target, data_intercepted, connections_accepted, str(_pcap))
+
+
+def _ask_link_layer() -> bool:
+    """Ask whether to run in link-layer mode (intercepts all L2CAP, not just GATT).
+
+    Link-layer mode exposes SMP, L2CAP signalling, and raw ATT — invisible to
+    GATT-only monitors. Essential for catching encryption negotiation and pairing.
+    """
+    try:
+        raw = input(
+            "\n  Use link-layer proxy mode (all L2CAP, not just GATT)? [y/N]: "
+        ).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return raw in ("y", "yes")
 
 
 def _ask_wireshark() -> bool:

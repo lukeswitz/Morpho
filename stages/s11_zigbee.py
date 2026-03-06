@@ -53,7 +53,7 @@ def run(dongle: WhadDongle, engagement_id: str, mode: str = "passive") -> None:
     Args:
         dongle: Active WHAD dongle.
         engagement_id: Engagement ID for Finding storage.
-        mode: "passive" (default) or "coordinator" (rogue coordinator).
+        mode: "passive" (default), "coordinator" (rogue PAN), or "enddevice" (join a real PAN).
     """
     try:
         from whad.zigbee import Sniffer
@@ -246,6 +246,19 @@ def run(dongle: WhadDongle, engagement_id: str, mode: str = "passive") -> None:
         best_ch = _best_channel(networks)
         _run_coordinator(dongle, engagement_id, best_ch)
 
+    # EndDevice mode: join a real ZigBee network as a device, capture group traffic.
+    if mode == "enddevice":
+        if networks:
+            best_pan, best_info = max(
+                networks.items(), key=lambda kv: kv[1]["pkt_count"]
+            )
+            _run_enddevice(dongle, engagement_id, best_info["channel"], best_pan)
+        else:
+            log.warning(
+                "[S11] EndDevice mode: no ZigBee networks found in passive scan. "
+                "Specify channel manually or run passive scan first."
+            )
+
 
 # ---------------------------------------------------------------------------
 # ZigBee Coordinator (rogue PAN)
@@ -398,6 +411,188 @@ def _run_coordinator(
         key_str = d['key_hex'] if d.get('key_hex') else "(no key)"
         print(f"    {d['address']}  key={key_str}")
     print("─" * 76 + "\n")
+
+
+# ---------------------------------------------------------------------------
+# ZigBee EndDevice (join a real PAN, capture group traffic)
+# ---------------------------------------------------------------------------
+
+def _run_enddevice(
+    dongle: WhadDongle,
+    engagement_id: str,
+    channel: int,
+    pan_id: int,
+) -> None:
+    """Join a real ZigBee network as an EndDevice and capture group/broadcast traffic.
+
+    Uses whad.zigbee.connector.enddevice.EndDevice. On successful association the
+    device receives broadcast/group frames and can inject application commands.
+
+    Finding: zigbee_enddevice_joined (critical) — we joined without a valid link key,
+    proving the network does not enforce install-code or pre-configured key policy.
+    """
+    try:
+        from whad.zigbee.connector.enddevice import EndDevice
+    except ImportError:
+        log.warning(
+            "[S11] whad.zigbee.connector.enddevice not importable — "
+            "EndDevice mode requires WHAD with ZigBee EndDevice support."
+        )
+        return
+
+    log.info(
+        f"[S11] EndDevice joining PAN 0x{pan_id:04X} on channel {channel} ..."
+    )
+    print(
+        f"\n  [S11] ZigBee EndDevice join: PAN 0x{pan_id:04X}  channel {channel}"
+    )
+
+    joined = False
+    frames_received: list[str] = []
+    join_timeout = getattr(config, "ZIGBEE_COORD_SECS", 60)
+
+    try:
+        enddevice = EndDevice(dongle.device)
+        enddevice.channel = channel
+        enddevice.start()
+
+        # Attempt association — API varies; try join(pan_id) then associate()
+        for method_name in ("join", "associate", "connect"):
+            fn = getattr(enddevice, method_name, None)
+            if fn is None:
+                continue
+            try:
+                result = fn(pan_id)
+                joined = bool(result) if isinstance(result, bool) else True
+                log.info(f"[S11] EndDevice.{method_name}(0x{pan_id:04X}) → {result}")
+                break
+            except Exception as exc:
+                log.debug(f"[S11] {method_name}(0x{pan_id:04X}): {exc}")
+
+        if not joined:
+            # Some EndDevice implementations auto-associate on start()
+            # — check after a brief wait
+            time.sleep(2)
+            joined = bool(
+                getattr(enddevice, "associated", False)
+                or getattr(enddevice, "joined", False)
+                or getattr(enddevice, "is_joined", False)
+            )
+
+        if not joined:
+            log.info(
+                "[S11] EndDevice did not associate. "
+                "Network may require install codes or pre-configured link keys."
+            )
+            _record_enddevice_rejected(engagement_id, channel, pan_id)
+            return
+
+        log.info(f"[S11] *** Joined ZigBee PAN 0x{pan_id:04X} as EndDevice! ***")
+        print(f"  [S11] Association accepted! Listening for group traffic ...")
+
+        deadline = time.time() + join_timeout
+        for pkt in _enddevice_stream(enddevice, deadline):
+            hex_repr = bytes(pkt).hex() if pkt else ""
+            if hex_repr:
+                frames_received.append(hex_repr[:64])
+                log.info(f"[S11] Frame: {hex_repr[:64]}")
+                if len(frames_received) >= 50:
+                    break
+
+    except Exception as exc:
+        log.warning(f"[S11] EndDevice error: {type(exc).__name__}: {exc}")
+        return
+    finally:
+        try:
+            enddevice.stop()
+        except Exception:
+            pass
+
+    if joined:
+        _record_enddevice_joined(engagement_id, channel, pan_id, frames_received)
+
+
+def _enddevice_stream(enddevice, deadline: float):
+    """Yield packets from an EndDevice until deadline, handling API variations."""
+    while time.time() < deadline:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        try:
+            # Stream/sniff API
+            fn = getattr(enddevice, "stream", None) or getattr(enddevice, "sniff", None)
+            if fn:
+                for pkt in fn(timeout=min(3.0, remaining)):
+                    yield pkt
+                    if time.time() >= deadline:
+                        return
+            else:
+                # wait_packet API
+                wpkt = getattr(enddevice, "wait_packet", None)
+                if wpkt:
+                    pkt = wpkt(timeout=min(2.0, remaining))
+                    if pkt:
+                        yield pkt
+                else:
+                    time.sleep(1.0)
+        except StopIteration:
+            break
+        except Exception as exc:
+            log.debug(f"[S11] EndDevice stream: {exc}")
+            time.sleep(0.5)
+
+
+def _record_enddevice_joined(
+    engagement_id: str, channel: int, pan_id: int, frames: list[str]
+) -> None:
+    insert_finding(Finding(
+        type="zigbee_enddevice_joined",
+        severity="critical",
+        target_addr=f"zigbee_pan_{pan_id:04x}",
+        description=(
+            f"Successfully joined ZigBee PAN 0x{pan_id:04X} on channel {channel} "
+            f"as an EndDevice without a pre-configured link key or install code. "
+            f"{len(frames)} broadcast/group frame(s) received after association. "
+            "An attacker can inject ZigBee application commands as a legitimate device."
+        ),
+        remediation=(
+            "Enable ZigBee Trust Center Link Key (TCLK) policy requiring install codes "
+            "(ZigBee 3.0 mandatory). Disable permit joining except during commissioning. "
+            "Audit all devices allowed to join. Use ZigBee Security Level 5 (AES-128)."
+        ),
+        evidence={
+            "pan_id": f"0x{pan_id:04X}",
+            "channel": channel,
+            "frames_received": len(frames),
+            "sample_frames": frames[:5],
+        },
+        pcap_path=None,
+        engagement_id=engagement_id,
+    ))
+    log.info(f"FINDING [critical] zigbee_enddevice_joined: PAN 0x{pan_id:04X}")
+
+
+def _record_enddevice_rejected(
+    engagement_id: str, channel: int, pan_id: int
+) -> None:
+    insert_finding(Finding(
+        type="zigbee_enddevice_rejected",
+        severity="info",
+        target_addr=f"zigbee_pan_{pan_id:04x}",
+        description=(
+            f"ZigBee EndDevice join attempt to PAN 0x{pan_id:04X} on channel {channel} "
+            "was rejected. Network may enforce install codes or pre-configured link keys."
+        ),
+        remediation=(
+            "Good — install code enforcement is active. "
+            "Verify all devices use unique install codes and the Trust Center "
+            "enforces TCLK uniqueness. Periodic audit of joined device list."
+        ),
+        evidence={"pan_id": f"0x{pan_id:04X}", "channel": channel},
+        pcap_path=None,
+        engagement_id=engagement_id,
+    ))
+    log.info(f"FINDING [info] zigbee_enddevice_rejected: PAN 0x{pan_id:04X}")
 
 
 # ---------------------------------------------------------------------------

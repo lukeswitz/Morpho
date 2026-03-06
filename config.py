@@ -59,6 +59,7 @@ SUBGHZ_PER_FREQ_SECS = 2     # dwell per frequency step
 # Secondary device interfaces (auto-detected from whadup if not set)
 ESB_INTERFACE: str | None = None         # rfstorm0 if available
 PHY_SUBGHZ_INTERFACE: str | None = None  # yardstickone0 if available
+UBERTOOTH_INTERFACE: str | None = None   # ubertooth0 if available
 
 HIGH_VALUE_PATTERNS = [
     r"lock",

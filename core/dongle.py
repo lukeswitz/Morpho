@@ -52,7 +52,7 @@ class DongleCaps:
     can_zigbee:         bool = False  # IEEE 802.15.4 / ZigBee domain available
     can_send_pdu:       bool = False  # Central.enable_synchronous + send_pdu available
     firmware_version:   str | None = None
-    device_type:        str = "unknown"  # "butterfly" | "hci" | "rfstorm" | "yardstickone" | "unknown"
+    device_type:        str = "unknown"  # "butterfly" | "hci" | "rfstorm" | "yardstickone" | "ubertooth" | "unknown"
 
     def summary_lines(self) -> list[str]:
         tick = lambda b: "yes" if b else "no"
@@ -84,12 +84,13 @@ class DongleCaps:
 class HardwareMap:
     """References to all detected WHAD dongles.
 
-    ble_dongle is always present (session fails if unavailable).
-    esb_dongle and phy_dongle are None when the hardware isn't connected.
+    All fields are Optional. A session can run with only ESB/PHY hardware; BLE
+    stages are skipped when ble_dongle is None.
     """
-    ble_dongle: "WhadDongle"
-    esb_dongle: "WhadDongle | None" = None  # rfstorm0 — ESB + Unifying
-    phy_dongle: "WhadDongle | None" = None  # yardstickone0 — sub-GHz PHY
+    ble_dongle:       "WhadDongle | None" = None  # uart0/hci0 — BLE (stages 1-9, 11-13)
+    esb_dongle:       "WhadDongle | None" = None  # rfstorm0 — ESB + Unifying
+    phy_dongle:       "WhadDongle | None" = None  # yardstickone0 — sub-GHz PHY
+    ubertooth_dongle: "WhadDongle | None" = None  # ubertooth0 — passive BLE sniffer
 
 
 # ---------------------------------------------------------------------------
@@ -204,18 +205,38 @@ class WhadDongle:
             caps.device_type = "rfstorm"
         elif "yardstickone" in _iface_lo:
             caps.device_type = "yardstickone"
+        elif "ubertooth" in _iface_lo:
+            caps.device_type = "ubertooth"
 
-        # --- Probes 1–6: BLE connectors — skip for non-BLE hardware ---
-        # Instantiating a connector and calling start()/stop() registers it
-        # with the WhadDevice and causes WhadDeviceTimeout on ButteRFly.
-        # For ButteRFly firmware, capability == class importability, so
-        # import + hasattr is sufficient for all connectors.
+        # --- Probes 1–6: BLE connectors ---
         # RfStorm and YardStickOne have no BLE transceiver — skip entirely.
+        # Ubertooth One is a passive BLE sniffer only — supports Scanner and
+        # Sniffer (probes 1-2) but NOT Central/Peripheral/reactive jam (3-6).
         if caps.device_type in ("rfstorm", "yardstickone"):
             log.debug(
                 f"Cap probe: Skipping BLE probes 1-6 for {caps.device_type} device "
                 "(no BLE transceiver)."
             )
+        elif caps.device_type == "ubertooth":
+            log.debug(
+                "Cap probe: Ubertooth One — probing passive BLE only (scan + sniff). "
+                "Central/Peripheral/ReactiveJam not supported."
+            )
+            # Probe 1: Scanner
+            try:
+                from whad.ble import Scanner  # noqa: F401
+                caps.can_scan = True
+            except ImportError:
+                pass
+            # Probe 2: Sniffer
+            try:
+                from whad.ble import Sniffer
+                caps.can_sniff = True
+                caps.can_sniff_active = True
+                caps.sniff_api = "iterator" if not hasattr(Sniffer, "wait_packet") else "wait_packet"
+            except ImportError:
+                pass
+            # Probes 3-6 not applicable to Ubertooth
         else:
             # --- Probe 1: Scanner ---
             try:
@@ -316,7 +337,7 @@ class WhadDongle:
         # LoRaWAN requires a dedicated LoRa transceiver (SX1276/SX1278 or equivalent).
         # The ButteRFly (nRF52840) has no LoRa radio — the Python module may be importable
         # on the VM, but the hardware cannot drive it. Skip probe for butterfly devices.
-        if caps.device_type in ("butterfly", "rfstorm", "yardstickone"):
+        if caps.device_type in ("butterfly", "rfstorm", "yardstickone", "ubertooth"):
             log.warning(
                 f"Cap probe: LoRaWAN skipped — {caps.device_type} has no LoRa transceiver. "
                 "can_lorawan=False."
@@ -580,27 +601,41 @@ def detect_hardware(
     ble_interface: str,
     esb_interface: str | None,
     phy_interface: str | None,
+    ubertooth_interface: str | None = None,
 ) -> HardwareMap:
     """Open and probe each requested WHAD interface.
 
-    BLE dongle is required — SystemExit on failure.
-    ESB and PHY dongles log a warning and return None if unavailable.
+    All dongles are optional. If the BLE interface is unavailable, a warning is
+    logged and ble_dongle is set to None — BLE stages will be skipped. If no
+    devices are found at all, the process exits.
 
-    Auto-detects rfstorm0/yardstickone0 from whadup when the interface
-    args are None and config values are unset.
+    Auto-detects rfstorm0/yardstickone0/ubertooth0 from whadup when the
+    interface args are None and config values are unset.
     """
     # Auto-detect secondary devices from whadup output if not explicitly set
-    if esb_interface is None or phy_interface is None:
+    if esb_interface is None or phy_interface is None or ubertooth_interface is None:
         discovered = WhadDongle.enumerate_devices()
         for name, dtype in discovered:
-            if esb_interface is None and dtype.lower() in ("rfstorm",):
+            dtype_lo = dtype.lower()
+            if esb_interface is None and dtype_lo in ("rfstorm",):
                 esb_interface = name
                 log.info(f"Auto-detected ESB device: {name} ({dtype})")
-            if phy_interface is None and dtype.lower() in ("yardstickone",):
+            if phy_interface is None and dtype_lo in ("yardstickone",):
                 phy_interface = name
                 log.info(f"Auto-detected PHY sub-GHz device: {name} ({dtype})")
+            if ubertooth_interface is None and dtype_lo in ("ubertoothone", "ubertooth"):
+                ubertooth_interface = name
+                log.info(f"Auto-detected Ubertooth One: {name} ({dtype})")
 
-    ble_dongle = WhadDongle.create(ble_interface)
+    ble_dongle: WhadDongle | None = None
+    try:
+        ble_dongle = WhadDongle.create(ble_interface)
+    except SystemExit:
+        log.warning(
+            f"BLE dongle ({ble_interface}) not available — "
+            "BLE stages 1-9, 11-13, 15-16 will be skipped. "
+            "Use --interface to specify the correct interface."
+        )
 
     esb_dongle: WhadDongle | None = None
     if esb_interface:
@@ -609,7 +644,7 @@ def detect_hardware(
         except SystemExit:
             log.warning(
                 f"ESB device {esb_interface!r} not found — "
-                "stages 10 and 14 will fall back to primary interface."
+                "stages 10 and 14 will fall back to BLE interface (if available)."
             )
             esb_dongle = None
 
@@ -624,8 +659,27 @@ def detect_hardware(
             )
             phy_dongle = None
 
+    ubertooth_dongle: WhadDongle | None = None
+    if ubertooth_interface:
+        try:
+            ubertooth_dongle = WhadDongle.create(ubertooth_interface)
+        except SystemExit:
+            log.warning(
+                f"Ubertooth One {ubertooth_interface!r} not found — "
+                "passive sniffer supplementation unavailable."
+            )
+            ubertooth_dongle = None
+
+    if ble_dongle is None and esb_dongle is None and phy_dongle is None and ubertooth_dongle is None:
+        log.error(
+            "No WHAD devices found. Run 'whadup' to list connected hardware. "
+            "Connect at least one WHAD device and retry."
+        )
+        raise SystemExit(1)
+
     return HardwareMap(
         ble_dongle=ble_dongle,
         esb_dongle=esb_dongle,
         phy_dongle=phy_dongle,
+        ubertooth_dongle=ubertooth_dongle,
     )
