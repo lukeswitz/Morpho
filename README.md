@@ -1,4 +1,4 @@
-# Butterfly-RedTeam
+# RubyWaves
 
 Multi-protocol wireless red team framework built on [WHAD](https://github.com/whad-team/whad-client). Runs a structured 21-stage assessment pipeline — BLE, ESB, Logitech Unifying, ZigBee, LoRaWAN, sub-GHz PHY, and Bluetooth Classic — with per-stage authorization gates, automatic hardware detection, SQLite findings storage, and Markdown/JSON reporting.
 
