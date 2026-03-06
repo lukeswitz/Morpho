@@ -14,6 +14,7 @@ as findings with channel and packet count evidence.
 from __future__ import annotations
 
 import math
+import threading
 import time
 
 from core.dongle import WhadDongle
@@ -86,7 +87,6 @@ def run(dongle: WhadDongle, engagement_id: str) -> None:
 
 
 def _scan_with_sniffer(dongle: WhadDongle, engagement_id: str) -> None:
-    """ESB Sniffer path — stable on RfStorm; loops all channels automatically."""
     log.info(
         f"[S14][sniffer] ESB Sniffer — scanning all channels "
         f"({config.ESB_SCAN_SECS}s total) ..."
@@ -94,49 +94,77 @@ def _scan_with_sniffer(dongle: WhadDongle, engagement_id: str) -> None:
 
     devices: dict[str, dict] = {}
     plaintext_addrs: dict[str, list[str]] = {}
+    stop_event = threading.Event()
 
     try:
         sniffer = _EsbSniffer(dongle.device)
-        sniffer.channel = None  # None → scan all channels 0-100
+        sniffer.channel = None
         sniffer.start()
     except Exception as exc:
-        log.warning(f"[S14][sniffer] ESB Sniffer init/start failed: {type(exc).__name__}: {exc}")
+        log.warning(
+            f"[S14][sniffer] ESB Sniffer init/start failed: "
+            f"{type(exc).__name__}: {exc}"
+        )
         return
 
-    deadline = time.time() + config.ESB_SCAN_SECS
-    try:
-        for pkt in sniffer.sniff():
-            if time.time() >= deadline:
-                break
-            ch = getattr(pkt, "channel", getattr(pkt, "rf_channel", "?"))
-            addr = _extract_addr(pkt)
-            if addr:
-                if addr not in devices:
-                    devices[addr] = {"channels": set(), "packet_count": 0, "sample_hex": ""}
-                    log.info(f"[S14][sniffer] New ESB device: {addr} on ch {ch}")
-                devices[addr]["channels"].add(ch)
-                devices[addr]["packet_count"] += 1
-                if not devices[addr]["sample_hex"]:
-                    try:
-                        devices[addr]["sample_hex"] = bytes(pkt).hex()[:32]
-                    except Exception:
-                        pass
-                payload = _extract_payload(pkt)
-                if payload and _looks_plaintext(payload):
-                    if addr not in plaintext_addrs:
-                        plaintext_addrs[addr] = []
-                        log.info(
-                            f"[S14][sniffer] Low-entropy payload from {addr} "
-                            f"(entropy={_entropy(payload):.2f}) — possible plaintext ESB"
-                        )
-                    plaintext_addrs[addr].append(payload.hex()[:32])
-    except Exception as exc:
-        log.debug(f"[S14][sniffer] sniff loop: {type(exc).__name__}: {exc}")
-    finally:
+    def _reader():
         try:
-            sniffer.stop()
-        except Exception:
-            pass
+            for pkt in sniffer.sniff():
+                if stop_event.is_set():
+                    return
+                ch = getattr(pkt, "channel", getattr(pkt, "rf_channel", "?"))
+                addr = _extract_addr(pkt)
+                if addr:
+                    if addr not in devices:
+                        devices[addr] = {
+                            "channels": set(),
+                            "packet_count": 0,
+                            "sample_hex": "",
+                        }
+                        log.info(
+                            f"[S14][sniffer] New ESB device: {addr} on ch {ch}"
+                        )
+                    devices[addr]["channels"].add(ch)
+                    devices[addr]["packet_count"] += 1
+                    if not devices[addr]["sample_hex"]:
+                        try:
+                            devices[addr]["sample_hex"] = bytes(pkt).hex()[:32]
+                        except Exception:
+                            pass
+                    payload = _extract_payload(pkt)
+                    if payload and _looks_plaintext(payload):
+                        if addr not in plaintext_addrs:
+                            plaintext_addrs[addr] = []
+                            log.info(
+                                f"[S14][sniffer] Low-entropy payload from {addr} "
+                                f"(entropy={_entropy(payload):.2f}) "
+                                "— possible plaintext ESB"
+                            )
+                        plaintext_addrs[addr].append(payload.hex()[:32])
+        except Exception as exc:
+            if not stop_event.is_set():
+                log.debug(
+                    f"[S14][sniffer] sniff loop: {type(exc).__name__}: {exc}"
+                )
+
+    t = threading.Thread(target=_reader, daemon=True)
+    t.start()
+    t.join(timeout=config.ESB_SCAN_SECS)
+
+    stop_event.set()
+    try:
+        sniffer.stop()
+    except Exception:
+        pass
+
+    # Give the reader thread a short window to unblock after sniffer.stop()
+    t.join(timeout=3.0)
+    if t.is_alive():
+        log.warning(
+            "[S14][sniffer] Reader thread did not exit cleanly — "
+            "sniffer.sniff() generator may not be interruptible. "
+            "Thread is daemonized and will be abandoned."
+        )
 
     _record_findings(engagement_id, devices, plaintext_addrs)
     _print_summary(devices, plaintext_addrs)
