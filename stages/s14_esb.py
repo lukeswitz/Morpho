@@ -34,19 +34,126 @@ except ImportError:
     _EsbScanner = None  # type: ignore[assignment,misc]
     _ESB_IMPORTABLE = False
 
+try:
+    from whad.esb import Sniffer as _EsbSniffer
+    _ESB_SNIFFER_IMPORTABLE = True
+except ImportError:
+    _EsbSniffer = None  # type: ignore[assignment,misc]
+    _ESB_SNIFFER_IMPORTABLE = False
+
+def _patch_connector_sniff() -> bool:
+    """Patch Connector.sniff() to accept and drop ESB-specific kwargs.
+
+    whad.esb.Scanner.__init__ calls super().sniff(show_acknowledgements=True,
+    address=...) but the base Connector.sniff() only accepts (messages, timeout).
+    Known bug tracked in whad-client issue #288, targeted for v1.3.0.
+    This patch lets Scanner instantiate cleanly on v1.2.x.
+    """
+    try:
+        from whad.device.connector import Connector
+        orig = Connector.sniff
+        if getattr(orig, "_esb_patched", False):
+            return True
+        def _patched(self, messages=None, timeout=None, **_kwargs):
+            return orig(self, messages=messages, timeout=timeout)
+        _patched._esb_patched = True  # type: ignore[attr-defined]
+        Connector.sniff = _patched  # type: ignore[method-assign]
+        return True
+    except Exception:
+        return False
+
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def run(dongle: WhadDongle, engagement_id: str) -> None:
-    if not _ESB_IMPORTABLE:
+    if not _ESB_IMPORTABLE and not _ESB_SNIFFER_IMPORTABLE:
         log.warning(
             "[S14] whad.esb module not importable on this installation. "
             "ESB raw scan skipped."
         )
         return
 
+    # RfStorm (nRF24L01+) uses whad.esb.Sniffer with channel=None — loops all
+    # 0-100 channels natively and is stable on installed WHAD.
+    # nRF52840 (butterfly) uses whad.esb.Scanner which requires a monkey-patch
+    # to work around a kwargs mismatch bug in super().sniff().
+    if dongle.caps.device_type == "rfstorm" and _ESB_SNIFFER_IMPORTABLE:
+        log.info("[S14] RfStorm device — using ESB Sniffer (channel=None, stable path).")
+        _scan_with_sniffer(dongle, engagement_id)
+    else:
+        log.info("[S14] Using ESB Scanner path (nRF52840 / fallback).")
+        _scan_with_scanner(dongle, engagement_id)
+
+
+def _scan_with_sniffer(dongle: WhadDongle, engagement_id: str) -> None:
+    """ESB Sniffer path — stable on RfStorm; loops all channels automatically."""
     log.info(
-        f"[S14] ESB raw channel scan — {len(_ESB_CHANNELS)} channels "
+        f"[S14][sniffer] ESB Sniffer — scanning all channels "
+        f"({config.ESB_SCAN_SECS}s total) ..."
+    )
+
+    devices: dict[str, dict] = {}
+    plaintext_addrs: dict[str, list[str]] = {}
+
+    try:
+        sniffer = _EsbSniffer(dongle.device)
+        sniffer.channel = None  # None → scan all channels 0-100
+        sniffer.start()
+    except Exception as exc:
+        log.warning(f"[S14][sniffer] ESB Sniffer init/start failed: {type(exc).__name__}: {exc}")
+        return
+
+    deadline = time.time() + config.ESB_SCAN_SECS
+    try:
+        for pkt in sniffer.sniff():
+            if time.time() >= deadline:
+                break
+            ch = getattr(pkt, "channel", getattr(pkt, "rf_channel", "?"))
+            addr = _extract_addr(pkt)
+            if addr:
+                if addr not in devices:
+                    devices[addr] = {"channels": set(), "packet_count": 0, "sample_hex": ""}
+                    log.info(f"[S14][sniffer] New ESB device: {addr} on ch {ch}")
+                devices[addr]["channels"].add(ch)
+                devices[addr]["packet_count"] += 1
+                if not devices[addr]["sample_hex"]:
+                    try:
+                        devices[addr]["sample_hex"] = bytes(pkt).hex()[:32]
+                    except Exception:
+                        pass
+                payload = _extract_payload(pkt)
+                if payload and _looks_plaintext(payload):
+                    if addr not in plaintext_addrs:
+                        plaintext_addrs[addr] = []
+                        log.info(
+                            f"[S14][sniffer] Low-entropy payload from {addr} "
+                            f"(entropy={_entropy(payload):.2f}) — possible plaintext ESB"
+                        )
+                    plaintext_addrs[addr].append(payload.hex()[:32])
+    except Exception as exc:
+        log.debug(f"[S14][sniffer] sniff loop: {type(exc).__name__}: {exc}")
+    finally:
+        try:
+            sniffer.stop()
+        except Exception:
+            pass
+
+    _record_findings(engagement_id, devices, plaintext_addrs)
+    _print_summary(devices, plaintext_addrs)
+
+
+def _scan_with_scanner(dongle: WhadDongle, engagement_id: str) -> None:
+    """ESB Scanner path — nRF52840 / fallback; requires monkey-patch on v1.2.x."""
+    if not _ESB_IMPORTABLE:
+        log.warning("[S14][scanner] whad.esb.Scanner not importable — skipping.")
+        return
+
+    if dongle.caps.device_type != "rfstorm":
+        if not _patch_connector_sniff():
+            log.warning("[S14][scanner] Could not patch Connector.sniff() — scan may fail.")
+
+    log.info(
+        f"[S14][scanner] ESB raw channel scan — {len(_ESB_CHANNELS)} channels "
         f"× {config.ESB_PER_CH_SECS}s dwell ({config.ESB_SCAN_SECS}s total) ..."
     )
 
@@ -54,26 +161,26 @@ def run(dongle: WhadDongle, engagement_id: str) -> None:
         scanner = _EsbScanner(dongle.device)
     except TypeError as exc:
         log.warning(
-            f"[S14] ESB Scanner API incompatible with this WHAD version: {exc}\n"
+            f"[S14][scanner] ESB Scanner API incompatible with this WHAD version: {exc}\n"
             "  Known issue: whad.esb.Scanner kwargs mismatch in super().sniff(). "
             "Upgrade WHAD to fix. ESB scan skipped."
         )
         return
     except Exception as exc:
-        log.warning(f"[S14] ESB Scanner init failed: {type(exc).__name__}: {exc}")
+        log.warning(f"[S14][scanner] ESB Scanner init failed: {type(exc).__name__}: {exc}")
         return
 
     try:
         scanner.start()
     except TypeError as exc:
-        log.warning(f"[S14] ESB Scanner.start() TypeError: {exc} — skipping.")
+        log.warning(f"[S14][scanner] ESB Scanner.start() TypeError: {exc} — skipping.")
         return
     except Exception as exc:
-        log.warning(f"[S14] ESB Scanner.start() failed: {type(exc).__name__}: {exc}")
+        log.warning(f"[S14][scanner] ESB Scanner.start() failed: {type(exc).__name__}: {exc}")
         return
 
-    devices: dict[str, dict] = {}  # addr → {channels, packet_count, sample_hex}
-    plaintext_addrs: dict[str, list[str]] = {}  # addr → [sample payload hex]
+    devices: dict[str, dict] = {}
+    plaintext_addrs: dict[str, list[str]] = {}
     deadline = time.time() + config.ESB_SCAN_SECS
     scan_ok = True
 
@@ -93,7 +200,7 @@ def run(dongle: WhadDongle, engagement_id: str) -> None:
                                     "packet_count": 0,
                                     "sample_hex": "",
                                 }
-                                log.info(f"[S14] New ESB device: {addr} on ch {ch}")
+                                log.info(f"[S14][scanner] New ESB device: {addr} on ch {ch}")
                             devices[addr]["channels"].add(ch)
                             devices[addr]["packet_count"] += 1
                             if not devices[addr]["sample_hex"]:
@@ -101,30 +208,29 @@ def run(dongle: WhadDongle, engagement_id: str) -> None:
                                     devices[addr]["sample_hex"] = bytes(pkt).hex()[:32]
                                 except Exception:
                                     pass
-
                             payload = _extract_payload(pkt)
                             if payload and _looks_plaintext(payload):
                                 if addr not in plaintext_addrs:
                                     plaintext_addrs[addr] = []
                                     log.info(
-                                        f"[S14] Low-entropy payload from {addr} "
+                                        f"[S14][scanner] Low-entropy payload from {addr} "
                                         f"(entropy={_entropy(payload):.2f} bits/byte)"
                                         " — possible unencrypted ESB traffic"
                                     )
                                 plaintext_addrs[addr].append(payload.hex()[:32])
                 except TypeError as exc:
                     log.warning(
-                        f"[S14] ESB scan API crash on ch {ch}: {exc}\n"
+                        f"[S14][scanner] ESB scan API crash on ch {ch}: {exc}\n"
                         "  Known issue: whad.esb.Scanner incompatible with this WHAD version."
                     )
                     scan_ok = False
                     break
                 except AttributeError:
-                    log.debug("[S14] wait_packet() not available on ESB Scanner — scan aborted.")
+                    log.debug("[S14][scanner] wait_packet() not available — scan aborted.")
                     scan_ok = False
                     break
                 except Exception as exc:
-                    log.debug(f"[S14] ch {ch}: {type(exc).__name__}: {exc}")
+                    log.debug(f"[S14][scanner] ch {ch}: {type(exc).__name__}: {exc}")
     finally:
         try:
             scanner.stop()

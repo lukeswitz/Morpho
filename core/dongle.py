@@ -52,7 +52,7 @@ class DongleCaps:
     can_zigbee:         bool = False  # IEEE 802.15.4 / ZigBee domain available
     can_send_pdu:       bool = False  # Central.enable_synchronous + send_pdu available
     firmware_version:   str | None = None
-    device_type:        str = "unknown"  # "butterfly" | "hci" | "unknown"
+    device_type:        str = "unknown"  # "butterfly" | "hci" | "rfstorm" | "yardstickone" | "unknown"
 
     def summary_lines(self) -> list[str]:
         tick = lambda b: "yes" if b else "no"
@@ -74,6 +74,22 @@ class DongleCaps:
             f"  ZigBee (802.15.4): {tick(self.can_zigbee)}",
             f"  SendPDU (raw ATT): {tick(self.can_send_pdu)}",
         ]
+
+
+# ---------------------------------------------------------------------------
+# Hardware map — holds all detected WHAD dongles for a session
+# ---------------------------------------------------------------------------
+
+@dataclass
+class HardwareMap:
+    """References to all detected WHAD dongles.
+
+    ble_dongle is always present (session fails if unavailable).
+    esb_dongle and phy_dongle are None when the hardware isn't connected.
+    """
+    ble_dongle: "WhadDongle"
+    esb_dongle: "WhadDongle | None" = None  # rfstorm0 — ESB + Unifying
+    phy_dongle: "WhadDongle | None" = None  # yardstickone0 — sub-GHz PHY
 
 
 # ---------------------------------------------------------------------------
@@ -129,9 +145,19 @@ class WhadDongle:
 
     @classmethod
     def enumerate(cls) -> list[str]:
-        """
-        Return a list of WHAD interface strings for all connected devices.
-        Calls `whadup` and parses its output. Falls back to empty list on error.
+        """Return interface names for all connected WHAD devices."""
+        return [name for name, _ in cls.enumerate_devices()]
+
+    @classmethod
+    def enumerate_devices(cls) -> list[tuple[str, str]]:
+        """Return (interface_name, device_type) for all connected WHAD devices.
+
+        Parses `whadup` output format:
+            - yardstickone0
+              Type: YardStickOne
+              Index: 0
+              ...
+        Falls back to empty list on error.
         """
         try:
             result = subprocess.run(
@@ -140,15 +166,17 @@ class WhadDongle:
                 text=True,
                 timeout=config.DONGLE_TIMEOUT,
             )
-            interfaces: list[str] = []
+            devices: list[tuple[str, str]] = []
+            current_name: str | None = None
             for line in result.stdout.splitlines():
-                line = line.strip()
-                # whadup output lines look like:  uart0  UartDevice  /dev/ttyACM0
-                if line.startswith("uart") or line.startswith("hci"):
-                    parts = line.split()
-                    if parts:
-                        interfaces.append(parts[0])
-            return interfaces
+                stripped = line.strip()
+                if stripped.startswith("- "):
+                    current_name = stripped[2:].strip()
+                elif stripped.startswith("Type:") and current_name is not None:
+                    dev_type = stripped[len("Type:"):].strip()
+                    devices.append((current_name, dev_type))
+                    current_name = None
+            return devices
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return []
 
@@ -167,78 +195,89 @@ class WhadDongle:
         timeout = config.DONGLE_TIMEOUT
 
         # Detect device type from interface string
-        if "uart" in self.interface.lower():
+        _iface_lo = self.interface.lower()
+        if "uart" in _iface_lo:
             caps.device_type = "butterfly"
-        elif "hci" in self.interface.lower():
+        elif "hci" in _iface_lo:
             caps.device_type = "hci"
+        elif "rfstorm" in _iface_lo:
+            caps.device_type = "rfstorm"
+        elif "yardstickone" in _iface_lo:
+            caps.device_type = "yardstickone"
 
-        # --- Probes 1–6: class-level checks only — NO instantiation ---
+        # --- Probes 1–6: BLE connectors — skip for non-BLE hardware ---
         # Instantiating a connector and calling start()/stop() registers it
         # with the WhadDevice and causes WhadDeviceTimeout on ButteRFly.
         # For ButteRFly firmware, capability == class importability, so
         # import + hasattr is sufficient for all connectors.
+        # RfStorm and YardStickOne have no BLE transceiver — skip entirely.
+        if caps.device_type in ("rfstorm", "yardstickone"):
+            log.debug(
+                f"Cap probe: Skipping BLE probes 1-6 for {caps.device_type} device "
+                "(no BLE transceiver)."
+            )
+        else:
+            # --- Probe 1: Scanner ---
+            try:
+                from whad.ble import Scanner  # noqa: F401
+                caps.can_scan = True
+                log.debug("Cap probe: Scanner OK")
+            except ImportError as exc:
+                log.warning(f"Cap probe: Scanner not available ({exc})")
 
-        # --- Probe 1: Scanner ---
-        try:
-            from whad.ble import Scanner  # noqa: F401
-            caps.can_scan = True
-            log.debug("Cap probe: Scanner OK")
-        except ImportError as exc:
-            log.warning(f"Cap probe: Scanner not available ({exc})")
+            # --- Probe 2: Sniffer (passive advertisements) ---
+            try:
+                from whad.ble import Sniffer
+                caps.can_sniff = True
+                # Assumption 1: wait_packet vs iterator API (class-level check)
+                if hasattr(Sniffer, "wait_packet"):
+                    caps.sniff_api = "wait_packet"
+                    caps.can_sniff_active = True
+                    log.debug("Cap probe: Sniffer wait_packet API confirmed")
+                else:
+                    caps.sniff_api = "iterator"
+                    log.debug("Cap probe: Sniffer iterator API (no wait_packet)")
+                log.debug("Cap probe: Sniffer OK")
+            except ImportError as exc:
+                log.warning(f"Cap probe: Sniffer not available ({exc})")
 
-        # --- Probe 2: Sniffer (passive advertisements) ---
-        try:
-            from whad.ble import Sniffer
-            caps.can_sniff = True
-            # Assumption 1: wait_packet vs iterator API (class-level check)
-            if hasattr(Sniffer, "wait_packet"):
-                caps.sniff_api = "wait_packet"
-                caps.can_sniff_active = True
-                log.debug("Cap probe: Sniffer wait_packet API confirmed")
-            else:
-                caps.sniff_api = "iterator"
-                log.debug("Cap probe: Sniffer iterator API (no wait_packet)")
-            log.debug("Cap probe: Sniffer OK")
-        except ImportError as exc:
-            log.warning(f"Cap probe: Sniffer not available ({exc})")
+            # --- Probe 3: BD address spoofing (Assumption 2) ---
+            try:
+                from whad.ble import Peripheral
+                caps.can_spoof_bd_addr = hasattr(Peripheral, "set_bd_address")
+                if caps.can_spoof_bd_addr:
+                    log.debug("Cap probe: BD address spoofing OK (method on class)")
+                else:
+                    log.warning("Cap probe: set_bd_address() not found on Peripheral class")
+            except ImportError as exc:
+                log.warning(f"Cap probe: Peripheral import failed ({exc})")
 
-        # --- Probe 3: BD address spoofing (Assumption 2) ---
-        try:
-            from whad.ble import Peripheral
-            caps.can_spoof_bd_addr = hasattr(Peripheral, "set_bd_address")
-            if caps.can_spoof_bd_addr:
-                log.debug("Cap probe: BD address spoofing OK (method on class)")
-            else:
-                log.warning("Cap probe: set_bd_address() not found on Peripheral class")
-        except ImportError as exc:
-            log.warning(f"Cap probe: Peripheral import failed ({exc})")
+            # --- Probe 4: ReactiveJam availability (Assumption 3) ---
+            try:
+                from whad.ble.connector import BLE
+                caps.can_reactive_jam = callable(getattr(BLE, "reactive_jam", None))
+                if caps.can_reactive_jam:
+                    log.debug("Cap probe: reactive_jam() method present on BLE class")
+                else:
+                    log.warning("Cap probe: reactive_jam() not found on BLE connector class")
+            except ImportError as exc:
+                log.warning(f"Cap probe: BLE connector import failed ({exc})")
 
-        # --- Probe 4: ReactiveJam availability (Assumption 3) ---
-        try:
-            from whad.ble.connector import BLE
-            caps.can_reactive_jam = callable(getattr(BLE, "reactive_jam", None))
-            if caps.can_reactive_jam:
-                log.debug("Cap probe: reactive_jam() method present on BLE class")
-            else:
-                log.warning("Cap probe: reactive_jam() not found on BLE connector class")
-        except ImportError as exc:
-            log.warning(f"Cap probe: BLE connector import failed ({exc})")
+            # --- Probe 5: Central ---
+            try:
+                from whad.ble import Central  # noqa: F401
+                caps.can_central = True
+                log.debug("Cap probe: Central OK")
+            except ImportError as exc:
+                log.warning(f"Cap probe: Central not available ({exc})")
 
-        # --- Probe 5: Central ---
-        try:
-            from whad.ble import Central  # noqa: F401
-            caps.can_central = True
-            log.debug("Cap probe: Central OK")
-        except ImportError as exc:
-            log.warning(f"Cap probe: Central not available ({exc})")
-
-        # --- Probe 6: Peripheral ---
-        try:
-            from whad.ble import Peripheral  # noqa: F401
-            caps.can_peripheral = True
-            log.debug("Cap probe: Peripheral OK")
-        except ImportError as exc:
-            log.warning(f"Cap probe: Peripheral not available ({exc})")
+            # --- Probe 6: Peripheral ---
+            try:
+                from whad.ble import Peripheral  # noqa: F401
+                caps.can_peripheral = True
+                log.debug("Cap probe: Peripheral OK")
+            except ImportError as exc:
+                log.warning(f"Cap probe: Peripheral not available ({exc})")
 
         # --- Probe 7: Logitech Unifying — check CLI tools in PATH ---
         import shutil as _shutil
@@ -277,9 +316,9 @@ class WhadDongle:
         # LoRaWAN requires a dedicated LoRa transceiver (SX1276/SX1278 or equivalent).
         # The ButteRFly (nRF52840) has no LoRa radio — the Python module may be importable
         # on the VM, but the hardware cannot drive it. Skip probe for butterfly devices.
-        if caps.device_type == "butterfly":
+        if caps.device_type in ("butterfly", "rfstorm", "yardstickone"):
             log.warning(
-                "Cap probe: LoRaWAN skipped — ButteRFly (nRF52840) has no LoRa transceiver. "
+                f"Cap probe: LoRaWAN skipped — {caps.device_type} has no LoRa transceiver. "
                 "can_lorawan=False."
             )
         else:
@@ -531,3 +570,62 @@ class WhadDongle:
     def _whad_log(self, msg: str) -> None:
         if self._verbose:
             print(f"[WHAD] {msg}")
+
+
+# ---------------------------------------------------------------------------
+# Multi-device detection
+# ---------------------------------------------------------------------------
+
+def detect_hardware(
+    ble_interface: str,
+    esb_interface: str | None,
+    phy_interface: str | None,
+) -> HardwareMap:
+    """Open and probe each requested WHAD interface.
+
+    BLE dongle is required — SystemExit on failure.
+    ESB and PHY dongles log a warning and return None if unavailable.
+
+    Auto-detects rfstorm0/yardstickone0 from whadup when the interface
+    args are None and config values are unset.
+    """
+    # Auto-detect secondary devices from whadup output if not explicitly set
+    if esb_interface is None or phy_interface is None:
+        discovered = WhadDongle.enumerate_devices()
+        for name, dtype in discovered:
+            if esb_interface is None and dtype.lower() in ("rfstorm",):
+                esb_interface = name
+                log.info(f"Auto-detected ESB device: {name} ({dtype})")
+            if phy_interface is None and dtype.lower() in ("yardstickone",):
+                phy_interface = name
+                log.info(f"Auto-detected PHY sub-GHz device: {name} ({dtype})")
+
+    ble_dongle = WhadDongle.create(ble_interface)
+
+    esb_dongle: WhadDongle | None = None
+    if esb_interface:
+        try:
+            esb_dongle = WhadDongle.create(esb_interface)
+        except SystemExit:
+            log.warning(
+                f"ESB device {esb_interface!r} not found — "
+                "stages 10 and 14 will fall back to primary interface."
+            )
+            esb_dongle = None
+
+    phy_dongle: WhadDongle | None = None
+    if phy_interface:
+        try:
+            phy_dongle = WhadDongle.create(phy_interface)
+        except SystemExit:
+            log.warning(
+                f"PHY sub-GHz device {phy_interface!r} not found — "
+                "stage 17 will be skipped."
+            )
+            phy_dongle = None
+
+    return HardwareMap(
+        ble_dongle=ble_dongle,
+        esb_dongle=esb_dongle,
+        phy_dongle=phy_dongle,
+    )

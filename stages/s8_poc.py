@@ -151,10 +151,12 @@ def run(
             log.info(f"[S8] No semantic actions applicable for {addr}.")
             return
 
-        log.info(
-            f"[S8] {len(actions)} action(s): "
-            f"{', '.join(a['label'] for a in actions)}"
-        )
+        _lbls = [a["label"] for a in actions]
+        if len(_lbls) > 8:
+            _lbl_str = ", ".join(_lbls[:8]) + f", … +{len(_lbls) - 8} more"
+        else:
+            _lbl_str = ", ".join(_lbls)
+        log.info(f"[S8] {len(actions)} action(s): {_lbl_str}")
 
         # Phase 1 — Baseline reads (by handle; no discovery required)
         for char in readable[:8]:
@@ -267,8 +269,12 @@ def run(
 
 # ── Action planning ───────────────────────────────────────────────────────────
 
+_MAX_PROPRIETARY_PROBES = 5  # cap to avoid flooding devices with many unknown chars
+
+
 def _plan_actions(writable: list[dict], notify_uuids: set[str]) -> list[dict]:
     actions: list[dict] = []
+    prop_count = 0
     for char in writable:
         uuid      = char["uuid"].upper()
         handle    = char["value_handle"]
@@ -281,6 +287,8 @@ def _plan_actions(writable: list[dict], notify_uuids: set[str]) -> list[dict]:
         elif uuid_norm == "2A39":
             actions.append({"label": "hr_control_reset", "handle": handle, "uuid": uuid})
         else:
+            if prop_count >= _MAX_PROPRIETARY_PROBES:
+                continue
             has_pair = _has_notify_pair(uuid, notify_uuids)
             if has_pair:
                 log.info(
@@ -294,6 +302,7 @@ def _plan_actions(writable: list[dict], notify_uuids: set[str]) -> list[dict]:
                 "probe_count":     len(_PROPRIETARY_PROBES),
                 "has_notify_pair": has_pair,
             })
+            prop_count += 1
     return actions
 
 

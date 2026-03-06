@@ -3,6 +3,19 @@ import sys
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+
+def _drain_stdin() -> None:
+    """Discard any buffered stdin bytes before an interactive prompt.
+
+    Prevents stale newlines (e.g. from SSH terminal buffering) from being
+    consumed as empty inputs and causing repeated blank-prompt loops.
+    """
+    try:
+        import termios
+        termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+    except Exception:
+        pass
+
 if TYPE_CHECKING:
     from core.models import Target
 
@@ -44,6 +57,7 @@ def active_gate(stage: int, description: str) -> bool:
     print(f"{'-------' * 10}")
     print("\n  This stage will transmit RF packets.")
     print("  Only proceed on equipment you own or have written authorization to test.\n")
+    _drain_stdin()
     while True:
         resp = input("  Proceed? [yes/skip/abort]: ").strip().lower()
         if resp == "yes":
@@ -134,6 +148,7 @@ def select_targets(
         if default_all:
             print("  [Enter] = all")
 
+    _drain_stdin()
     while True:
         _inp = input("  Selection: ").lower()
         # Strip non-printable/control chars that some terminals inject

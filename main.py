@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from core.dongle import WhadDongle
+from core.dongle import WhadDongle, HardwareMap, detect_hardware
 from core.db import init_db, upsert_engagement
 from core.logger import get_logger, stage_banner, active_gate, select_targets
 import config
@@ -55,9 +55,13 @@ def _parse_args() -> argparse.Namespace:
             "Comma-separated list of stages to run, or 'auto' to select based on "
             "dongle capabilities (default: auto). "
             "1=BLE scan, 2=conn intel, 3=clone, 4=jam, 5=GATT enum, 7=fuzz, "
-            "8=PoC, 9=inject (opt-in), 10=Unifying, 11=ZigBee, 12=PHY, "
-            "13=SMP pairing, 14=ESB, 15=LoRaWAN. "
-            "Stages 6 (proxy, needs 2 interfaces) and 9 (injection) always require explicit opt-in."
+            "8=PoC, 9=inject (opt-in), 10=Unifying (sniff/inject/ducky/mouse), "
+            "11=ZigBee, 12=PHY, 13=SMP pairing, 14=ESB passive, 15=LoRaWAN, "
+            "17=sub-GHz PHY (YardStickOne, opt-in), "
+            "18=ESB PRX/PTX active (rfstorm, opt-in), "
+            "19=Unifying Python API (rfstorm, opt-in). "
+            "Stages 6 (proxy, needs 2 interfaces), 9 (BLE injection), "
+            "17, 18, and 19 always require explicit opt-in."
         ),
     )
     p.add_argument(
@@ -79,6 +83,18 @@ def _parse_args() -> argparse.Namespace:
         help=f"Second interface for Stage 6 wble-proxy (default: {config.PROXY_INTERFACE})",
     )
     p.add_argument(
+        "--esb-interface",
+        default=None,
+        metavar="IFACE",
+        help="WHAD interface for ESB/Unifying stages 10+14 (default: auto-detect rfstorm0)",
+    )
+    p.add_argument(
+        "--phy-interface",
+        default=None,
+        metavar="IFACE",
+        help="WHAD interface for sub-GHz PHY stage 17 (default: auto-detect yardstickone0)",
+    )
+    p.add_argument(
         "--debug",
         action="store_true",
         help="Enable DEBUG-level logging",
@@ -95,6 +111,10 @@ def _apply_args(args: argparse.Namespace) -> None:
     if args.targets:
         config.TARGET_FILTER = [a.upper() for a in args.targets]
     config.PROXY_INTERFACE = args.proxy_interface
+    if args.esb_interface:
+        config.ESB_INTERFACE = args.esb_interface
+    if args.phy_interface:
+        config.PHY_SUBGHZ_INTERFACE = args.phy_interface
     if args.debug:
         # Lower all already-created named loggers (created at import time)
         for logger in _logging.Logger.manager.loggerDict.values():
@@ -118,12 +138,39 @@ def _banner(eng_id: str, name: str, location: str) -> None:
     print(f"{line}\n")
 
 
-def _caps_banner(dongle: WhadDongle) -> None:
+def _caps_banner(hw: HardwareMap) -> None:
     line = "─" * 49
     print(f"\n  DONGLE CAPABILITIES")
+    for dongle in [hw.ble_dongle, hw.esb_dongle, hw.phy_dongle]:
+        if dongle is None:
+            continue
+        print(f"  {line}")
+        print(f"  [{dongle.interface}]")
+        for ln in dongle.caps.summary_lines():
+            print(ln)
+    print(f"  {line}\n")
+
+
+def _hardware_banner(hw: HardwareMap) -> None:
+    line = "─" * 62
+    print(f"\n  HARDWARE DETECTED")
     print(f"  {line}")
-    for l in dongle.caps.summary_lines():
-        print(l)
+    ble_stages = "BLE stages 1-9, 11-13, 15-16 (opt-in: 6, 9)"
+    print(f"  [{hw.ble_dongle.interface}]")
+    print(f"    Type     : {hw.ble_dongle.caps.device_type}")
+    print(f"    Handles  : {ble_stages}")
+    if hw.esb_dongle:
+        print(f"  [{hw.esb_dongle.interface}]")
+        print(f"    Type     : {hw.esb_dongle.caps.device_type}")
+        print(f"    Handles  : ESB/Unifying stages 10, 14, 18, 19")
+    else:
+        print(f"  [no ESB device] stages 10, 14 fall back to {hw.ble_dongle.interface}")
+    if hw.phy_dongle:
+        print(f"  [{hw.phy_dongle.interface}]")
+        print(f"    Type     : {hw.phy_dongle.caps.device_type}")
+        print(f"    Handles  : sub-GHz PHY stage 17")
+    else:
+        print(f"  [no sub-GHz PHY device] stage 17 will be skipped if requested")
     print(f"  {line}\n")
 
 
@@ -142,17 +189,22 @@ def main() -> None:
 
     _stages_arg = args.stages.strip().lower()
 
-    dongle = WhadDongle.create(config.INTERFACE)
-    _caps_banner(dongle)
+    hw = detect_hardware(
+        config.INTERFACE,
+        config.ESB_INTERFACE,
+        config.PHY_SUBGHZ_INTERFACE,
+    )
+    _caps_banner(hw)
+    _hardware_banner(hw)
 
     if _stages_arg == "auto":
-        stages_requested = _stages_from_caps(dongle.caps)
+        stages_requested = _stages_from_hardware(hw)
         _print_auto_stages(stages_requested)
     else:
         stages_requested = {
             int(s.strip()) for s in args.stages.split(",") if s.strip().isdigit()
         }
-        _warn_unsupported_stages(stages_requested, dongle.caps)
+        _warn_unsupported_stages(stages_requested, hw)
 
     targets = []
     connections = []
@@ -166,7 +218,7 @@ def main() -> None:
             from stages import s1_map
 
             stage_banner(1, "Environment Mapping", passive=True)
-            targets = s1_map.run(dongle, eng_id)
+            targets = s1_map.run(hw.ble_dongle, eng_id)
             log.info(
                 f"Stage 1 complete: {len(targets)} targets, "
                 f"{sum(1 for t in targets if t.connectable)} connectable"
@@ -178,7 +230,7 @@ def main() -> None:
                 from stages import s2_intel
 
                 stage_banner(2, "Connection Intelligence", passive=True)
-                connections, s2_gatt = s2_intel.run(dongle, connectable, eng_id)
+                connections, s2_gatt = s2_intel.run(hw.ble_dongle, connectable, eng_id)
                 for addr, profile in s2_gatt.items():
                     if addr not in gatt_profiles:
                         gatt_profiles[addr] = profile
@@ -209,7 +261,7 @@ def main() -> None:
                     from stages import s3_clone
 
                     s3_clone.run(
-                        dongle, high_value[0], eng_id,
+                        hw.ble_dongle, high_value[0], eng_id,
                         gatt_profiles.get(high_value[0].bd_address),
                     )
             else:
@@ -227,7 +279,7 @@ def main() -> None:
                     "Authorized targets only.",
                 ):
                     from stages import s4_jam
-                    s4_jam.run(dongle, jam_target, eng_id)
+                    s4_jam.run(hw.ble_dongle, jam_target, eng_id)
             else:
                 connectable = [t for t in targets if t.connectable]
                 if connectable:
@@ -247,7 +299,7 @@ def main() -> None:
                             "Authorized targets only.",
                         ):
                             from stages import s4_jam
-                            s4_jam.run(dongle, jam_target, eng_id)
+                            s4_jam.run(hw.ble_dongle, jam_target, eng_id)
                     else:
                         log.info("Stage 4 skipped by operator.")
                 else:
@@ -273,7 +325,7 @@ def main() -> None:
                     ):
                         from stages import s5_interact
                         for t in gatt_picks:
-                            handles, profile = s5_interact.run(dongle, t, eng_id)
+                            handles, profile = s5_interact.run(hw.ble_dongle, t, eng_id)
                             if handles:
                                 gatt_writable[t.bd_address] = handles
                             if profile:
@@ -309,7 +361,7 @@ def main() -> None:
                         f"({proxy_picks[0].name or proxy_picks[0].device_class}). "
                         "Requires two RF interfaces. Authorized targets only.",
                     ):
-                        s6_proxy.run(dongle, proxy_picks[0], eng_id)
+                        s6_proxy.run(hw.ble_dongle, proxy_picks[0], eng_id)
                 else:
                     log.info("Stage 6 skipped by operator.")
             else:
@@ -363,7 +415,7 @@ def main() -> None:
                         from stages import s7_fuzz
                         for t in fuzz_picks:
                             found = s7_fuzz.run(
-                                dongle, t, eng_id,
+                                hw.ble_dongle, t, eng_id,
                                 prepped_handles=gatt_writable.get(t.bd_address),
                             )
                             if found and t.bd_address not in gatt_writable:
@@ -397,7 +449,7 @@ def main() -> None:
                     poc_name = _name_input if _name_input else "BLE-PoC"
                     for t in poc_targets:
                         s8_poc.run(
-                            dongle, t, eng_id,
+                            hw.ble_dongle, t, eng_id,
                             gatt_profiles.get(t.bd_address, []),
                             poc_name=poc_name,
                         )
@@ -426,7 +478,7 @@ def main() -> None:
                         f"Mode: {mode}. Authorized targets only.",
                     ):
                         s9_inject.run(
-                            dongle, inject_picks[0], eng_id, connections, mode
+                            hw.ble_dongle, inject_picks[0], eng_id, connections, mode
                         )
                 else:
                     log.info("Stage 9 skipped by operator.")
@@ -436,46 +488,107 @@ def main() -> None:
         if 10 in stages_requested:
             from stages import s10_unifying
 
+            _esb_dev = hw.esb_dongle or hw.ble_dongle
+            _esb_iface = hw.esb_dongle.interface if hw.esb_dongle else config.INTERFACE
             stage_banner(10, "Logitech Unifying / MouseJack", passive=False)
             uni_mode = _ask_unifying_mode()
             if not config.ACTIVE_GATE or active_gate(
                 10,
-                f"Will transmit on 2.4 GHz Unifying channels. "
+                f"Will transmit on 2.4 GHz Unifying channels via {_esb_iface}. "
                 f"Mode: {uni_mode}. Authorized environments only.",
             ):
-                s10_unifying.run(dongle, eng_id, uni_mode)
+                s10_unifying.run(_esb_dev, eng_id, uni_mode, interface=_esb_iface)
             else:
                 log.info("Stage 10 skipped by operator.")
 
         if 11 in stages_requested:
             from stages import s11_zigbee
 
-            stage_banner(11, "IEEE 802.15.4 / ZigBee Recon", passive=True)
-            s11_zigbee.run(dongle, eng_id)
+            zigbee_mode = _ask_zigbee_mode()
+            if zigbee_mode == "coordinator":
+                stage_banner(11, "IEEE 802.15.4 / ZigBee — Rogue Coordinator", passive=False)
+                if not config.ACTIVE_GATE or active_gate(
+                    11,
+                    "Will create a rogue ZigBee PAN and open a join window. "
+                    "End devices that join without install-code enforcement will "
+                    "reveal key material. Authorized environments only.",
+                ):
+                    s11_zigbee.run(hw.ble_dongle, eng_id, mode="coordinator")
+                else:
+                    log.info("Stage 11 coordinator mode skipped by operator.")
+            else:
+                stage_banner(11, "IEEE 802.15.4 / ZigBee Recon", passive=True)
+                s11_zigbee.run(hw.ble_dongle, eng_id, mode="passive")
 
         if 12 in stages_requested:
             from stages import s12_phy
 
-            stage_banner(12, "PHY / ISM Band Survey", passive=True)
-            s12_phy.run(dongle, eng_id)
+            stage_banner(12, "PHY / ISM Band Survey (2.4 GHz)", passive=True)
+            s12_phy.run(hw.ble_dongle, eng_id)
 
         if 14 in stages_requested:
             from stages import s14_esb
 
+            _esb_dev = hw.esb_dongle or hw.ble_dongle
             stage_banner(14, "ESB Raw Channel Scan", passive=True)
-            s14_esb.run(dongle, eng_id)
+            s14_esb.run(_esb_dev, eng_id)
 
         if 15 in stages_requested:
             from stages import s15_lorawan
 
             stage_banner(15, "LoRaWAN Recon", passive=True)
-            s15_lorawan.run(dongle, eng_id)
+            s15_lorawan.run(hw.ble_dongle, eng_id)
 
         if 16 in stages_requested:
             from stages import s16_l2cap
 
             stage_banner(16, "L2CAP CoC (capability gap)", passive=True)
-            s16_l2cap.run(dongle, eng_id)
+            s16_l2cap.run(hw.ble_dongle, eng_id)
+
+        if 17 in stages_requested:
+            from stages import s17_subghz
+
+            stage_banner(17, "sub-GHz PHY Survey (YardStickOne)", passive=True)
+            if hw.phy_dongle is None:
+                log.warning(
+                    "[S17] No YardStickOne detected — sub-GHz PHY sweep skipped. "
+                    "Connect a YardStickOne and retry with --phy-interface yardstickone0."
+                )
+            else:
+                s17_subghz.run(hw.phy_dongle, eng_id)
+
+        if 18 in stages_requested:
+            from stages import s18_esb_active
+
+            _esb_dev = hw.esb_dongle or hw.ble_dongle
+            _esb_iface = hw.esb_dongle.interface if hw.esb_dongle else config.INTERFACE
+            stage_banner(18, "ESB PRX/PTX Active Attack (RfStorm)", passive=False)
+            if not config.ACTIVE_GATE or active_gate(
+                18,
+                f"Will transmit ESB frames on 2.4 GHz via {_esb_iface}. "
+                "PRX mode intercepts frames addressed to a device. "
+                "PTX mode injects unauthenticated commands. "
+                "Authorized environments only.",
+            ):
+                s18_esb_active.run(_esb_dev, eng_id)
+            else:
+                log.info("Stage 18 skipped by operator.")
+
+        if 19 in stages_requested:
+            from stages import s19_unifying_api
+
+            _esb_dev = hw.esb_dongle or hw.ble_dongle
+            _esb_iface = hw.esb_dongle.interface if hw.esb_dongle else config.INTERFACE
+            stage_banner(19, "Logitech Unifying Python API (RfStorm)", passive=False)
+            if not config.ACTIVE_GATE or active_gate(
+                19,
+                f"Will inject cursor/keystroke events to a Unifying receiver via {_esb_iface}. "
+                "Mouse/Keyboard/DuckyScript modes available. "
+                "Authorized devices only.",
+            ):
+                s19_unifying_api.run(_esb_dev, eng_id)
+            else:
+                log.info("Stage 19 skipped by operator.")
 
         if 13 in stages_requested and targets:
             pairing_targets = [t for t in targets if t.connectable]
@@ -489,7 +602,7 @@ def main() -> None:
                 ):
                     from stages import s13_pairing
                     for idx, t in enumerate(pairing_targets):
-                        s13_pairing.run(dongle, t, eng_id)
+                        s13_pairing.run(hw.ble_dongle, t, eng_id)
                         if idx < len(pairing_targets) - 1:
                             time.sleep(3.0)  # dongle recovery between targets
             else:
@@ -498,7 +611,11 @@ def main() -> None:
     except KeyboardInterrupt:
         log.info("Run aborted by user.")
     finally:
-        dongle.close()
+        hw.ble_dongle.close()
+        if hw.esb_dongle:
+            hw.esb_dongle.close()
+        if hw.phy_dongle:
+            hw.phy_dongle.close()
 
     from output.markdown_report import generate as gen_md
     from output.json_report import generate as gen_json
@@ -508,8 +625,9 @@ def main() -> None:
     _emit_summary(eng_id)
 
 
-def _stages_from_caps(caps) -> set[int]:
-    """Return the set of stage numbers supportable by this dongle's capabilities."""
+def _stages_from_hardware(hw: HardwareMap) -> set[int]:
+    """Return the set of stage numbers supportable by detected hardware."""
+    caps = hw.ble_dongle.caps
     stages: set[int] = set()
     if caps.can_scan:           stages.add(1)               # passive BLE scan
     if caps.can_sniff:          stages.add(2)               # connection intelligence
@@ -518,11 +636,19 @@ def _stages_from_caps(caps) -> set[int]:
     if caps.can_central:        stages.update({5, 7, 8, 13})  # GATT enum/fuzz/PoC, SMP
     # S6 (MITM proxy) requires a second RF interface — always opt-in
     # S9 (packet injection) is destructive — always opt-in
-    if caps.can_unifying:       stages.add(10)              # Logitech Unifying/MouseJack
+    # S17 (sub-GHz) requires YardStickOne — auto-selected below
+    # ESB/Unifying: available from primary OR rfstorm dongle
+    _esb_caps = hw.esb_dongle.caps if hw.esb_dongle else caps
+    if _esb_caps.can_unifying or caps.can_unifying:
+        stages.add(10)                                       # Logitech Unifying/MouseJack
     if caps.can_zigbee:         stages.add(11)              # ZigBee/802.15.4 recon
-    if caps.can_phy:            stages.add(12)              # PHY ISM band survey
-    if caps.can_esb:            stages.add(14)              # ESB raw channel scan
+    if caps.can_phy:            stages.add(12)              # PHY 2.4 GHz ISM band survey
+    if _esb_caps.can_esb or caps.can_esb:
+        stages.add(14)                                       # ESB raw channel scan
     if caps.can_lorawan:        stages.add(15)              # LoRaWAN recon
+    if hw.phy_dongle is not None:
+        stages.add(17)                                       # sub-GHz PHY (YardStickOne)
+    # S18 (ESB PRX/PTX) + S19 (Unifying API) are always opt-in — not auto-selected
     return stages
 
 
@@ -531,8 +657,11 @@ def _print_auto_stages(stages: set[int]) -> None:
     print(f"  Auto-selected stages : {nums}\n")
 
 
-def _warn_unsupported_stages(stages: set[int], caps) -> None:
-    """Log a warning for each explicitly requested stage the dongle cannot support."""
+def _warn_unsupported_stages(stages: set[int], hw: HardwareMap) -> None:
+    """Log a warning for each explicitly requested stage the hardware cannot support."""
+    caps = hw.ble_dongle.caps
+    _esb_caps = hw.esb_dongle.caps if hw.esb_dongle else caps
+
     _STAGE_CAP: dict[int, tuple[str, str]] = {
         1:  ("can_scan",        "BLE Scanner"),
         2:  ("can_sniff",       "BLE Sniffer"),
@@ -549,12 +678,30 @@ def _warn_unsupported_stages(stages: set[int], caps) -> None:
         13: ("can_central",     "BLE Central"),
         14: ("can_esb",         "ESB module"),
         15: ("can_lorawan",     "LoRaWAN module"),
+        18: ("can_esb",         "ESB module (PRX/PTX)"),
+        19: ("can_unifying",    "Unifying module"),
     }
     for s in sorted(stages):
+        if s == 17:
+            if hw.phy_dongle is None:
+                log.warning(
+                    "Stage 17 requires a YardStickOne (phy_dongle=None) — "
+                    "stage will be skipped. Connect YardStickOne or use --phy-interface."
+                )
+            continue
+        if s in (18, 19):
+            if hw.esb_dongle is None:
+                log.warning(
+                    f"Stage {s} works best with an RfStorm dongle (esb_dongle=None) — "
+                    "will fall back to BLE dongle but synchronize() may fail."
+                )
+            continue
         if s not in _STAGE_CAP:
             continue
         cap_name, cap_label = _STAGE_CAP[s]
-        if not getattr(caps, cap_name, True):
+        # ESB/Unifying stages can use either primary or ESB dongle
+        check_caps = _esb_caps if s in (10, 14) else caps
+        if not getattr(check_caps, cap_name, True):
             log.warning(
                 f"Stage {s} requires {cap_label} ({cap_name}=False) — "
                 "stage will skip itself at runtime."
@@ -582,23 +729,44 @@ def _ask_inject_mode() -> str:
         print("  Please enter A or I.")
 
 
-def _ask_unifying_mode() -> str:
-    """Prompt operator to select passive sniff or MouseJack inject mode."""
-    print("\n  Stage 10 — Select Unifying mode:")
-    print("    [S]  Sniff  — passive scan for Unifying devices,")
-    print("                  capture mouse/keyboard events")
-    print("    [I]  Inject — MouseJack: synchronise and inject keystrokes")
-    print("                  into a vulnerable Unifying receiver")
+def _ask_zigbee_mode() -> str:
+    """Prompt operator to select ZigBee passive scan or rogue coordinator mode."""
+    print("\n  Stage 11 — Select ZigBee mode:")
+    print("    [P]  Passive     — sniff channels 11-26, recover keys, decrypt traffic")
+    print("    [C]  Coordinator — create rogue PAN, open join window, capture joins")
     while True:
         try:
-            choice = input("  Select mode [S/I]: ").strip().upper()
+            choice = input("  Select mode [P/C]: ").strip().upper()
+        except (KeyboardInterrupt, EOFError):
+            return "passive"
+        if choice in ("P", ""):
+            return "passive"
+        if choice == "C":
+            return "coordinator"
+        print("  Please enter P or C.")
+
+
+def _ask_unifying_mode() -> str:
+    """Prompt operator to select Unifying attack mode."""
+    print("\n  Stage 10 — Select Unifying mode:")
+    print("    [S]  Sniff   — passive scan, keylog, wanalyze PCAP pipeline")
+    print("    [I]  Inject  — MouseJack: inject text keystrokes into receiver")
+    print("    [D]  Ducky   — MouseJack: replay DuckyScript file (-d) with locale")
+    print("    [M]  Mouse   — inject cursor movement and click (scripted or relay)")
+    while True:
+        try:
+            choice = input("  Select mode [S/I/D/M]: ").strip().upper()
         except (KeyboardInterrupt, EOFError):
             return "sniff"
         if choice in ("S", ""):
             return "sniff"
         if choice == "I":
             return "inject"
-        print("  Please enter S or I.")
+        if choice == "D":
+            return "ducky"
+        if choice == "M":
+            return "mouse"
+        print("  Please enter S, I, D, or M.")
 
 
 def _emit_summary(eng_id: str) -> None:
