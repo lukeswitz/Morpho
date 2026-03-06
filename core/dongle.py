@@ -582,11 +582,27 @@ class WhadDongle:
         (threads started, opened=True) and allows discover() to succeed.
         """
         orig_reset = self.device.reset
+        orig_discover = self.device.discover
+
         self.device.reset = lambda: None
+
+        def _safe_discover():
+            # discover() sends DeviceInfoRequest and waits for a response.
+            # On ButteRFly, after re-open it may time out because the firmware
+            # already sent DeviceReady and won't repeat the info response.
+            # Capabilities were already enumerated during probe_caps(); silently
+            # skip timeout here so the connector initialises normally.
+            try:
+                orig_discover()
+            except Exception as exc:
+                log.debug(f"device.discover() swallowed (probed earlier): {exc}")
+
+        self.device.discover = _safe_discover
         try:
             return connector_cls(self.device, *args)
         finally:
             self.device.reset = orig_reset
+            self.device.discover = orig_discover
 
     def _whad_log(self, msg: str) -> None:
         if self._verbose:

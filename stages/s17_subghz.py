@@ -327,7 +327,64 @@ def _ook_sweep(
             insert_finding(finding)
             log.info(f"FINDING [info] phy_subghz_ook_activity: {freq_mhz} MHz")
 
+            # Focused PCAP capture: re-tune to this frequency and record for
+            # SUBGHZ_RECORD_SECS seconds. Print a replay command hint.
+            _record_ook_signal(
+                dongle, PhySniffer, SnifferConfiguration,
+                freq_mhz, engagement_id
+            )
+
     return active
+
+
+def _record_ook_signal(
+    dongle: WhadDongle,
+    PhySniffer: type,
+    SnifferConfiguration: type,
+    freq_mhz: int,
+    engagement_id: str,
+) -> None:
+    """Capture an OOK signal PCAP at the given frequency for offline replay PoC."""
+    import config as _cfg
+    freq_hz = freq_mhz * 1_000_000
+    cap_path = pcap_path(engagement_id, 17, f"ook_{freq_mhz}mhz")
+
+    record_secs = getattr(_cfg, "SUBGHZ_RECORD_SECS", 5)
+    log.info(f"[S17][OOK] Recording {record_secs}s at {freq_mhz} MHz → {cap_path}")
+    try:
+        cfg = SnifferConfiguration()
+        cfg.frequency    = freq_hz
+        cfg.modulation   = "OOK"
+        cfg.datarate     = _OOK_DATARATE
+        cfg.max_pkt_size = 255
+
+        sniffer = PhySniffer(dongle.device)
+        sniffer.configuration = cfg
+
+        monitor = attach_monitor(sniffer, cap_path)
+        deadline = time.time() + record_secs
+        for _ in sniffer.sniff(timeout=record_secs):
+            if time.time() >= deadline:
+                break
+
+        detach_monitor(monitor)
+        try:
+            sniffer.stop()
+        except Exception:
+            pass
+
+        iface = getattr(_cfg, "PHY_SUBGHZ_INTERFACE", "yardstickone0")
+        if cap_path.exists() and cap_path.stat().st_size > 0:
+            log.info(
+                f"[S17][OOK] Signal PCAP: {cap_path}\n"
+                f"  Replay PoC: wplay --flush {cap_path} phy | "
+                f"winject -i {iface} phy --frequency {freq_hz} --modulation OOK"
+            )
+        else:
+            log.debug(f"[S17][OOK] No signal recorded at {freq_mhz} MHz (PCAP empty).")
+    except Exception as exc:
+        log.debug(f"[S17][OOK] Record {freq_mhz} MHz: {type(exc).__name__}: {exc}")
+
 
 
 # ---------------------------------------------------------------------------

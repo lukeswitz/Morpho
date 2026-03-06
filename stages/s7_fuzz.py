@@ -42,22 +42,54 @@ import config
 log = get_logger("s7_fuzz")
 
 PROFILE_TIMEOUT = 45    # seconds for profile phase
-FUZZ_TIMEOUT    = 120   # seconds for fuzz script execution
+FUZZ_TIMEOUT    = 300   # seconds for fuzz script execution (increased for bigger payload set)
 SETTLE_SECS     = 2.0   # pause between Phase 1 and Phase 2
 
 # Fuzz payloads: (label, command, hex_bytes_string)
 # command is "write" (expects ATT response) or "writecmd" (no response)
 _FUZZ_PAYLOADS: list[tuple[str, str, str]] = [
-    ("empty",      "write",    ""),
-    ("null_1",     "write",    "00"),
-    ("null_20",    "write",    "00 " * 20),
-    ("ff_20",      "write",    "ff " * 20),
-    ("ff_200",     "write",    "ff " * 200),
-    ("ff_512",     "write",    "ff " * 512),
-    ("seq_256",    "write",    " ".join(f"{i:02x}" for i in range(256))),
+    # Basic coverage
+    ("empty",       "write",    ""),
+    ("null_1",      "write",    "00"),
+    ("null_20",     "write",    "00 " * 20),
+    ("ff_20",       "write",    "ff " * 20),
+    ("ff_200",      "write",    "ff " * 200),
+    ("ff_512",      "write",    "ff " * 512),
+    ("seq_256",     "write",    " ".join(f"{i:02x}" for i in range(256))),
+    # ATT MTU boundary probes (MTU negotiated to 247 in S5: max payload = 244 bytes)
+    ("mtu_exact",   "write",    "aa " * 244),   # exactly at limit
+    ("mtu_plus1",   "write",    "aa " * 245),   # one over — ATT should reject
+    ("mtu_plus8",   "write",    "aa " * 252),
+    ("ovf_300",     "write",    "cc " * 300),
+    # Type confusion — firmware may parse these as typed values
+    ("bool_true",   "write",    "01"),
+    ("bool_inv",    "write",    "02"),           # invalid boolean
+    ("int_zero",    "write",    "00 00 00 00"),
+    ("int_maxu32",  "write",    "ff ff ff ff"),
+    ("int_neg64",   "write",    "ff ff ff ff ff ff ff ff"),  # -1 as int64
+    ("float_nan",   "write",    "00 00 c0 ff"),  # IEEE 754 NaN (little-endian)
+    ("float_inf",   "write",    "00 00 80 7f"),  # +Inf
+    ("ascii_20",    "write",    " ".join(f"{b:02x}" for b in b"A" * 20)),
+    ("ascii_fmt",   "write",    " ".join(f"{b:02x}" for b in b"%s%s%s%n%n%n")),
+    ("utf8_bomb",   "write",    " ".join(f"{b:02x}" for b in "AAAA\x00\xff\xfe".encode())),
+    # Cycling and alternating patterns
+    ("cycle_64",    "write",    " ".join(f"{i%256:02x}" for i in range(64))),
+    ("alt_7f80",    "write",    "7f 80 " * 20),
+    ("alt_0100",    "write",    "01 00 " * 20),
     # write-without-response variants
-    ("ff_20_nc",   "writecmd", "ff " * 20),
-    ("ff_200_nc",  "writecmd", "ff " * 200),
+    ("ff_20_nc",    "writecmd", "ff " * 20),
+    ("ff_200_nc",   "writecmd", "ff " * 200),
+    ("mtu_nc",      "writecmd", "aa " * 244),
+]
+
+# Payloads for subscribe+write notification-handler fuzzing (smaller focused set)
+_SUB_WRITE_PAYLOADS: list[tuple[str, str, str]] = [
+    ("sw_empty",    "write",    ""),
+    ("sw_ff_20",    "write",    "ff " * 20),
+    ("sw_ff_200",   "write",    "ff " * 200),
+    ("sw_mtu",      "write",    "aa " * 244),
+    ("sw_ovf",      "write",    "ff " * 512),
+    ("sw_nc_200",   "writecmd", "ff " * 200),
 ]
 
 
@@ -81,6 +113,7 @@ def run(
     if prepped_handles is not None:
         # S5 already profiled this device — skip Phase 1
         writable_handles = prepped_handles
+        notify_handles: list[int] = []
         log.info(
             f"[S7] Using {len(writable_handles)} writable handle(s) from S5: "
             f"{writable_handles} — skipping re-profile."
@@ -119,18 +152,21 @@ def run(
             return []
 
         log.debug(f"[S7] Raw profile stdout for {addr}: {profile_stdout[:500]!r}")
-        writable_handles = _parse_writable_handles(profile_stdout)
+        writable_handles, notify_handles = _parse_handles(profile_stdout)
         if not writable_handles:
             log.info(f"[S7] No writable handles found on {addr} — nothing to fuzz.")
             _reopen_dongle(dongle)
             return []
 
         log.info(
-            f"[S7] Found {len(writable_handles)} writable handle(s): "
-            f"{writable_handles} — building fuzz script ..."
+            f"[S7] Found {len(writable_handles)} writable handle(s): {writable_handles}"
+            + (f", {len(notify_handles)} notifiable: {notify_handles}" if notify_handles else "")
+            + " — building fuzz script ..."
         )
 
-    script_path, total_writes = _write_fuzz_script(writable_handles, engagement_id)
+    script_path, total_writes = _write_fuzz_script(
+        writable_handles, engagement_id, notify_handles=notify_handles
+    )
     log.info(
         f"[S7] Phase 2 — fuzzing {addr} with {total_writes} writes "
         f"across {len(writable_handles)} handle(s) ..."
@@ -212,6 +248,37 @@ def _cli_available() -> bool:
     )
 
 
+def _parse_handles(profile_output: str) -> tuple[list[int], list[int]]:
+    """Parse writable and notifiable value handles from wble-central profile output.
+
+    Returns (writable_handles, notify_handles). A handle may appear in both.
+    Rights letters: R=read, W=write, N=notify, I=indicate.
+    """
+    ansi_re = re.compile(r"\[[0-9;]*[mABCDEFGHJKLMSTfnsulh]")
+    writable: list[int] = []
+    notifiable: list[int] = []
+
+    for raw_line in profile_output.splitlines():
+        line = ansi_re.sub("", raw_line).strip()
+        if not line:
+            continue
+        vh_match = re.search(r"value handle:\s*(\d+)", line, re.I)
+        if not vh_match:
+            continue
+        if re.match(r"service", line, re.I):
+            continue
+        prefix = re.split(r",\s*handle\s+\d+", line, maxsplit=1)[0]
+        after_name = re.sub(r".*\)", "", prefix).strip()
+        rights_letters = set((after_name or prefix).upper().replace(" ", ""))
+        vh = int(vh_match.group(1))
+        if "W" in rights_letters:
+            writable.append(vh)
+        if "N" in rights_letters or "I" in rights_letters or "notify" in line.lower():
+            notifiable.append(vh)
+
+    return writable, notifiable
+
+
 def _parse_writable_handles(profile_output: str) -> list[int]:
     """Extract value_handle integers for writable characteristics.
 
@@ -252,12 +319,20 @@ def _parse_writable_handles(profile_output: str) -> list[int]:
     return handles
 
 
-def _write_fuzz_script(handles: list[int], engagement_id: str) -> tuple[str, int]:
+def _write_fuzz_script(
+    handles: list[int],
+    engagement_id: str,
+    notify_handles: list[int] | None = None,
+) -> tuple[str, int]:
     """Generate a wble-central gsh fuzz script and write it to a temp file.
 
+    Phase A: standard payload matrix against all writable handles.
+    Phase B: subscribe+write notification-handler fuzzing for notifiable handles.
     Returns (script_path, total_write_count).
     """
+    import os
     lines: list[str] = []
+
     for handle in handles:
         for _label, cmd, hex_payload in _FUZZ_PAYLOADS:
             payload = hex_payload.strip()
@@ -266,13 +341,24 @@ def _write_fuzz_script(handles: list[int], engagement_id: str) -> tuple[str, int
             else:
                 lines.append(f"{cmd} {handle} hex")
 
+    # Subscribe+write: enable notifications on handle, fuzz the value, unsub.
+    # Targets notification callback handlers which are often less hardened than
+    # the ATT write handler itself.
+    for nh in (notify_handles or []):
+        lines.append(f"sub {nh}")
+        for _label, cmd, hex_payload in _SUB_WRITE_PAYLOADS:
+            payload = hex_payload.strip()
+            if payload:
+                lines.append(f"{cmd} {nh} hex {payload}")
+            else:
+                lines.append(f"{cmd} {nh} hex")
+        lines.append(f"unsub {nh}")
+
     script = "\n".join(lines) + "\n"
     fd, path = tempfile.mkstemp(prefix=f"s7_{engagement_id}_", suffix=".gsh")
     try:
-        import os
         os.write(fd, script.encode())
     finally:
-        import os
         os.close(fd)
     return path, len(lines)
 

@@ -26,6 +26,7 @@ from core.dongle import WhadDongle
 from core.models import Finding
 from core.db import insert_finding
 from core.logger import get_logger
+from core.pcap import pcap_path, attach_monitor, detach_monitor
 import config
 
 log = get_logger("s12_phy")
@@ -195,7 +196,91 @@ def run(dongle: WhadDongle, engagement_id: str) -> None:
             f"({info['pkt_count']} pkts)"
         )
 
+    if band_activity:
+        _capture_hot_frequencies(
+            dongle, PhySniffer, SnifferConfiguration, band_activity, engagement_id
+        )
+
     _print_summary(band_activity, total_packets)
+
+
+
+# ---------------------------------------------------------------------------
+# Focused PCAP capture for most-active frequencies
+# ---------------------------------------------------------------------------
+
+def _capture_hot_frequencies(
+    dongle: WhadDongle,
+    PhySniffer,
+    SnifferConfiguration,
+    band_activity: dict,
+    engagement_id: str,
+) -> None:
+    """Capture a short PCAP for each of the N most-active ISM frequencies.
+
+    For each active band, picks the most-trafficked member frequency, attaches
+    a PcapWriterMonitor, and captures for config.PHY_CAPTURE_SECS seconds.
+    The resulting PCAP file and a wplay replay command are logged for use in PoC.
+    """
+    import config as _cfg
+
+    # Build list of (pkt_count, freq_mhz) sorted descending
+    freq_scores: list[tuple[int, int]] = []
+    for info in band_activity.values():
+        best_freq = max(info["freqs_active"]) if info["freqs_active"] else None
+        if best_freq:
+            freq_scores.append((info["pkt_count"], best_freq))
+    freq_scores.sort(reverse=True)
+
+    top_n = freq_scores[: _cfg.PHY_CAPTURE_TOP_N]
+    if not top_n:
+        return
+
+    log.info(
+        f"[S12] Focused PCAP capture for top {len(top_n)} active frequency/"
+        f"frequencies ({_cfg.PHY_CAPTURE_SECS}s each) ..."
+    )
+
+    for pkt_count, freq_mhz in top_n:
+        freq_hz = freq_mhz * 1_000_000
+        cap_path = pcap_path(engagement_id, 12, f"phy_{freq_mhz}mhz")
+        log.info(f"[S12] Capturing {_cfg.PHY_CAPTURE_SECS}s at {freq_mhz} MHz → {cap_path}")
+
+        try:
+            cfg = SnifferConfiguration()
+            cfg.frequency  = freq_hz
+            cfg.modulation = "GFSK"
+            cfg.datarate   = _GFSK_DATARATE
+            cfg.deviation  = _GFSK_DEVIATION
+            cfg.max_pkt_size = 255
+
+            sniffer = PhySniffer(dongle.device)
+            sniffer.configuration = cfg
+
+            monitor = attach_monitor(sniffer, cap_path)
+            import time as _time
+            deadline = _time.time() + _cfg.PHY_CAPTURE_SECS
+
+            for _ in sniffer.sniff(timeout=_cfg.PHY_CAPTURE_SECS):
+                if _time.time() >= deadline:
+                    break
+
+            detach_monitor(monitor)
+            try:
+                sniffer.stop()
+            except Exception:
+                pass
+
+            if cap_path.exists() and cap_path.stat().st_size > 0:
+                log.info(
+                    f"[S12] PCAP saved: {cap_path}  "
+                    f"replay: wplay --flush {cap_path} phy | "
+                    f"winject -i {_cfg.INTERFACE} phy --frequency {freq_hz}"
+                )
+            else:
+                log.debug(f"[S12] No packets captured at {freq_mhz} MHz (PCAP empty).")
+        except Exception as exc:
+            log.debug(f"[S12] Focused capture {freq_mhz} MHz: {type(exc).__name__}: {exc}")
 
 
 # ---------------------------------------------------------------------------

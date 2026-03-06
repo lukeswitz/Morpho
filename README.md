@@ -72,8 +72,12 @@ python main.py -n "Engagement1" -l "Building A"
 # Explicit stage list
 python main.py -n "Engagement1" -l "Building A" --stages 1,2,5,7,8,10,14
 
-# Opt-in stages: 6 (MITM proxy), 9 (BLE inject), 17 (sub-GHz), 18 (ESB active),
-#                19 (Unifying API), 20 (BLE hijacker)
+# Enable all opt-in stages at once (4=jam, 6=proxy, 9=inject, 16=L2CAP,
+#   17=sub-GHz, 18=ESB active, 19=Unifying API, 20=hijack) — each still
+#   requires operator confirmation at the active-gate prompt
+python main.py -n "Engagement1" -l "Building A" --opt-in
+
+# Explicit opt-in stages without the flag
 python main.py -n "Engagement1" -l "Building A" --stages 1,2,5,9,17,18,19,20
 
 # Specific BLE target only
@@ -104,7 +108,7 @@ python main.py -n "Engagement1" --debug
 | 1 | Environment Mapping | Passive | BLE advertisement scan — discovers targets, classifies devices (access control, medical, industrial, it_gear, sensor), scores risk 0–10. Ubertooth One supplements scan range in a parallel thread when connected. |
 | 2 | Connection Intelligence | Passive | Sniffs CONNECT_IND PDUs; extracts pairing/LTK/IRK/CSRK key material via `wanalyze`; recovers passive GATT profiles from PCAP. |
 | 3 | Identity Cloning | Active | Rogue peripheral cloning target BD address and full GATT profile. Write-capture hooks record anything a connecting central writes. Transparent relay via `wble-spawn` (opt-in via `S3_SPAWN_MODE`). |
-| 4 | Reactive Jamming | Active | Disrupts BLE advertising/connections via `reactive_jam`. Operator selects target at runtime. |
+| 4 | Reactive Jamming | Active | Disrupts BLE advertising/connections via `reactive_jam`. Operator selects target at runtime. **Always opt-in** — requires `--opt-in` or explicit `--stages 4`. |
 | 5 | GATT Enumeration + Shell | Active | Connects and enumerates full GATT profile; reads Battery, DIS, HeartRate services; exports writable handles and JSON profile to `reports/`. MTU negotiated to 247. After enumeration, operator is offered an **interactive GATT shell** (see below). |
 | 6 | MITM Proxy | Active | Transparent BLE MITM via `wble-proxy`. Optional `--link-layer` mode intercepts all L2CAP PDUs (SMP, ATT, signalling) — invisible to GATT-only monitors. Requires two RF interfaces (`--proxy-interface`). Always opt-in. |
 | 7 | GATT Write Fuzzer | Active | Feeds oversized/malformed payloads to all writable handles; identifies handles that accept arbitrary writes vs those that enforce length/type validation. |
@@ -114,7 +118,7 @@ python main.py -n "Engagement1" --debug
 | 12 | PHY ISM Survey | Passive | Sweeps 2402–2480 MHz in 2 MHz steps with GFSK; aggregates activity into 5 MHz bands; reports packet count and peak RSSI. |
 | 13 | SMP Pairing Scan | Active | Tests 4 pairing modes (LESC/Legacy × Just Works/Bonding); extracts distributed keys from security database; thread-guarded against pairing() hanging indefinitely. |
 | 15 | LoRaWAN Recon | Passive | Listens for JoinRequest (captures DevEUI, AppEUI, DevNonce), DataUp frames. Tests DevNonce replay. Requires external LoRa radio hardware (not nRF52840). |
-| 16 | L2CAP CoC | Info | Documents the L2CAP Connection-Oriented Channel capability gap; records for reporting. |
+| 16 | L2CAP CoC | Active | Tests LE L2CAP Connection-Oriented Channels via Linux `AF_BLUETOOTH` sockets. Probes PSMs 0x0023–0x00FF for unauthenticated open channels; fuzzes accepted channels with malformed/oversized SDUs to detect buffer overflows. Prompts for target BD address at runtime. **Always opt-in.** |
 | 20 | BLE Connection Hijacker | Active | **InjectaBLE technique** — synchronises to a live BLE connection captured in S2 (Access Address, CRC init, channel map, hop parameters), evicts the legitimate Central via `LL_TERMINATE`, and takes over as Central. On successful hijack, opens an inline GATT shell against the hijacked peripheral. Requires `can_reactive_jam`. Always opt-in. |
 
 #### Interactive GATT Shell (Stage 5 / Stage 20 post-hijack)
@@ -162,15 +166,19 @@ After GATT enumeration (S5) or a successful hijack (S20), an embedded shell lets
 
 When `--stages auto` (default), the framework probes hardware capabilities after startup and selects stages automatically:
 
-- **BLE stages** selected by `can_scan`, `can_sniff`, `can_peripheral`, `can_central`, `can_reactive_jam` flags
-- **S20** (hijacker) selected when `can_reactive_jam` is present
+- **BLE stages** 1, 2, 3, 5, 7, 8, 13 selected by `can_scan`, `can_sniff`, `can_peripheral`, `can_central` flags
 - **S10 / S14** selected when any connected dongle has `can_unifying` / `can_esb`
+- **S11 / S12 / S15** selected by `can_zigbee`, `can_phy`, `can_lorawan`
 - **S17** selected when a YardStickOne is detected
 - **S21** selected when an HCI adapter or Ubertooth One is detected
-- **S6, S9, S17, S18, S19, S20** always require explicit opt-in (never auto-selected)
+- **Opt-in stages** (4, 6, 9, 16, 17, 18, 19, 20) are **never auto-selected** — use `--opt-in` or explicit `--stages N`
 
 ```
-Auto-selected stages : 1, 2, 3, 4, 5, 7, 8, 10, 11, 12, 13, 14, 20, 21
+# Full hardware (ButteRFly + rfstorm0 + yardstickone0 + ubertooth0):
+Auto-selected stages : 1, 2, 3, 5, 7, 8, 10, 11, 12, 13, 14, 17, 21
+
+# With --opt-in:
+Auto-selected stages : 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19, 20, 21
 ```
 
 ---
@@ -238,9 +246,12 @@ Auto-selected stages : 1, 2, 3, 4, 5, 7, 8, 10, 11, 12, 13, 14, 20, 21
 | `zigbee_enddevice_joined` | critical | 11 |
 | `zigbee_enddevice_rejected` | info | 11 |
 | `phy_rf_activity` | info | 12 |
+| `l2cap_coc_open_psm` | critical/high | 16 |
 | `phy_subghz_rf_activity` | info | 17 |
 | `phy_subghz_ook_activity` | info | 17 |
+| `esb_replay_accepted` | critical/high | 18 |
 | `smp_pairing_vulnerable` | high/medium | 13 |
+| `lorawan_fcnt_anomaly` | medium | 15 |
 | `btc_device_found` | info | 21 |
 | `btc_exposed_services` | medium | 21 |
 | `btc_weak_security_mode` | high | 21 |

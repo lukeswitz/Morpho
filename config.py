@@ -27,8 +27,9 @@ UNIFYING_LOCALE       = "us"             # keyboard locale for wuni-keyboard -l
 UNIFYING_DUCKY_SCRIPT: str | None = None # path to DuckyScript file for inject -d mode
 
 # Stage 18 — ESB PRX/PTX Active Attack
-ESB_PRX_TIMEOUT  = 30             # seconds to listen in PRX (passive ACK) mode
-ESB_PTX_PAYLOAD  = "050000000000" # hex payload bytes for PTX inject test
+ESB_PRX_TIMEOUT    = 30             # seconds to listen in PRX (passive ACK) mode
+ESB_PTX_PAYLOAD    = "050000000000" # hex payload bytes for PTX inject test
+ESB_REPLAY_FRAMES  = 5              # frames to capture in PRX before PTX replay
 
 # Stage 19 — Logitech Unifying Python API
 UNIFYING_MOUSE_MOVES  = 5                # mouse move demo steps
@@ -41,8 +42,10 @@ ZIGBEE_PER_CH_SECS  = 3    # dwell per channel (16 channels × 3s = 48s)
 ZIGBEE_COORD_SECS   = 60   # join window for rogue coordinator mode
 
 # Stage 12 — PHY / ISM Band Survey
-PHY_SWEEP_SECS    = 120  # informational total sweep budget
-PHY_PER_FREQ_SECS = 2    # dwell per frequency step (2 MHz spacing)
+PHY_SWEEP_SECS       = 120  # informational total sweep budget
+PHY_PER_FREQ_SECS    = 2    # dwell per frequency step (2 MHz spacing)
+PHY_CAPTURE_TOP_N    = 3    # focused PCAP capture for N most-active frequencies
+PHY_CAPTURE_SECS     = 5    # focused capture duration per hot frequency
 
 # Stage 14 — ESB Raw Scanner
 ESB_SCAN_SECS    = 60    # total scan budget across all channels
@@ -55,6 +58,7 @@ LORAWAN_SNIFF_SECS = 120      # total passive listen window
 # Stage 17 — YardStickOne sub-GHz PHY Survey
 SUBGHZ_SWEEP_SECS    = 120   # total sweep budget
 SUBGHZ_PER_FREQ_SECS = 2     # dwell per frequency step
+SUBGHZ_RECORD_SECS   = 5     # focused PCAP capture per active OOK frequency
 
 # Secondary device interfaces (auto-detected from whadup if not set)
 ESB_INTERFACE: str | None = None         # rfstorm0 if available

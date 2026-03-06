@@ -119,6 +119,8 @@ def run(dongle: WhadDongle, engagement_id: str) -> None:
             pass
 
     _record_findings(engagement_id, join_requests, data_frames)
+    if data_frames:
+        _analyze_fcnt(data_frames, engagement_id)
     _print_summary(region, join_requests, data_frames)
 
     if join_requests:
@@ -362,6 +364,65 @@ def _record_findings(
             engagement_id=engagement_id,
         ))
         log.info(f"FINDING [info] lorawan_data_frames: {len(data_frames)} frame(s)")
+
+
+
+def _analyze_fcnt(data_frames: list[dict], engagement_id: str) -> None:
+    """Detect anomalous LoRaWAN FCnt patterns: resets, non-monotonic, large gaps."""
+    from core.db import insert_finding as _insert
+    from core.models import Finding as _Finding
+
+    by_device: dict[str, list[int]] = {}
+    for frame in data_frames:
+        dev = frame.get("dev_addr") or "unknown"
+        try:
+            fcnt = int(frame.get("fcnt", -1))
+        except (ValueError, TypeError):
+            continue
+        if fcnt < 0:
+            continue
+        by_device.setdefault(dev, []).append(fcnt)
+
+    anomalies: list[dict] = []
+    for dev_addr, fcnts in by_device.items():
+        if fcnts[0] < 10:
+            anomalies.append({"dev_addr": dev_addr, "type": "low_fcnt", "first_fcnt": fcnts[0],
+                               "detail": "FCnt < 10 — new ABP session or counter reset"})
+            log.info(f"[S15] FCnt anomaly ({dev_addr}): low start FCnt={fcnts[0]}")
+        for i in range(1, len(fcnts)):
+            prev, curr = fcnts[i - 1], fcnts[i]
+            if curr <= prev:
+                anomalies.append({"dev_addr": dev_addr, "type": "non_monotonic",
+                                   "prev_fcnt": prev, "curr_fcnt": curr,
+                                   "detail": "Counter went backwards — replay or reset"})
+                log.info(f"[S15] FCnt anomaly ({dev_addr}): {prev} → {curr} (non-monotonic)")
+            elif curr - prev > 1000:
+                anomalies.append({"dev_addr": dev_addr, "type": "large_gap",
+                                   "prev_fcnt": prev, "curr_fcnt": curr,
+                                   "detail": f"Gap {curr - prev} — stale replay or frame loss"})
+                log.info(f"[S15] FCnt gap ({dev_addr}): {prev} → {curr} (gap {curr - prev})")
+
+    if not anomalies:
+        log.info("[S15] FCnt analysis: no anomalies.")
+        return
+
+    _insert(_Finding(
+        type="lorawan_fcnt_anomaly",
+        severity="medium",
+        target_addr="lorawan",
+        description=(
+            f"{len(anomalies)} LoRaWAN FCnt anomaly/anomalies detected. "
+            "Non-monotonic counters and resets are replay attack indicators."
+        ),
+        remediation=(
+            "Enforce strict monotonic FCnt at the Network Server. "
+            "Reject FCnt <= last seen per device. Use LoRaWAN 1.1 for secure rollover."
+        ),
+        evidence={"anomalies": anomalies[:10]},
+        pcap_path=None,
+        engagement_id=engagement_id,
+    ))
+    log.info(f"FINDING [medium] lorawan_fcnt_anomaly: {len(anomalies)} anomaly/anomalies")
 
 
 # ── Summary ───────────────────────────────────────────────────────────────────

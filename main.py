@@ -54,15 +54,23 @@ def _parse_args() -> argparse.Namespace:
         help=(
             "Comma-separated list of stages to run, or 'auto' to select based on "
             "dongle capabilities (default: auto). "
-            "1=BLE scan, 2=conn intel, 3=clone, 4=jam, 5=GATT enum, 7=fuzz, "
-            "8=PoC, 9=inject (opt-in), 10=Unifying (sniff/inject/ducky/mouse), "
-            "11=ZigBee, 12=PHY, 13=SMP pairing, 14=ESB passive, 15=LoRaWAN, "
-            "17=sub-GHz PHY (YardStickOne, opt-in), "
-            "18=ESB PRX/PTX active (rfstorm, opt-in), "
-            "19=Unifying Python API (rfstorm, opt-in). "
-            "20=BLE hijacker (opt-in), 21=BR/EDR scout. "
-            "Stages 6 (proxy, needs 2 interfaces), 9 (BLE injection), "
-            "17, 18, 19, and 20 always require explicit opt-in."
+            "1=BLE scan, 2=conn intel, 3=clone, 5=GATT enum, 7=fuzz, "
+            "8=PoC, 10=Unifying (sniff/inject/ducky/mouse), "
+            "11=ZigBee, 12=PHY, 13=SMP pairing, 14=ESB passive, 15=LoRaWAN, 21=BR/EDR scout. "
+            "Opt-in (require --opt-in or explicit --stages N): "
+            "4=jam, 6=proxy (needs 2 interfaces), 9=BLE injection, 16=L2CAP CoC, "
+            "17=sub-GHz PHY (YardStickOne), 18=ESB PRX/PTX (rfstorm), "
+            "19=Unifying Python API (rfstorm), 20=BLE hijacker."
+        ),
+    )
+    p.add_argument(
+        "--opt-in",
+        action="store_true",
+        help=(
+            "Enable all opt-in stages (4=jam, 6=MITM proxy, 9=inject, 16=L2CAP, "
+            "17=sub-GHz, 18=ESB active, 19=Unifying API, 20=BLE hijack). "
+            "Each still requires operator confirmation at runtime via active-gate. "
+            "Combine with --stages to add opt-in stages to an explicit list."
         ),
     )
     p.add_argument(
@@ -107,6 +115,11 @@ def _parse_args() -> argparse.Namespace:
         help="Enable DEBUG-level logging",
     )
     return p.parse_args()
+
+
+# Stages that require explicit operator opt-in (never auto-selected).
+# Each still prompts via active-gate when it runs.
+_OPT_IN_STAGES: frozenset[int] = frozenset({4, 6, 9, 16, 17, 18, 19, 20})
 
 
 def _apply_args(args: argparse.Namespace) -> None:
@@ -165,7 +178,7 @@ def _hardware_banner(hw: HardwareMap) -> None:
     print(f"\n  HARDWARE DETECTED")
     print(f"  {line}")
     if hw.ble_dongle:
-        ble_stages = "BLE stages 1-9, 11-13, 15-16 (opt-in: 6, 9)"
+        ble_stages = "BLE stages 1-3, 5, 7-8, 11-13, 15, 21 (opt-in: 4, 6, 9, 16, 20)"
         print(f"  [{hw.ble_dongle.interface}]")
         print(f"    Type     : {hw.ble_dongle.caps.device_type}")
         print(f"    Handles  : {ble_stages}")
@@ -218,11 +231,17 @@ def main() -> None:
 
     if _stages_arg == "auto":
         stages_requested = _stages_from_hardware(hw)
+        if args.opt_in:
+            stages_requested |= _OPT_IN_STAGES
+            log.info(f"[--opt-in] Added opt-in stages: {sorted(_OPT_IN_STAGES)}")
         _print_auto_stages(stages_requested)
     else:
         stages_requested = {
             int(s.strip()) for s in args.stages.split(",") if s.strip().isdigit()
         }
+        if args.opt_in:
+            stages_requested |= _OPT_IN_STAGES
+            log.info(f"[--opt-in] Added opt-in stages: {sorted(_OPT_IN_STAGES)}")
         _warn_unsupported_stages(stages_requested, hw)
 
     targets = []
@@ -735,7 +754,7 @@ def _stages_from_hardware(hw: HardwareMap) -> set[int]:
     if caps.can_scan:           stages.add(1)               # passive BLE scan
     if caps.can_sniff:          stages.add(2)               # connection intelligence
     if caps.can_peripheral:     stages.add(3)               # identity clone
-    if caps.can_reactive_jam:   stages.update({4, 20})       # reactive jamming + hijack
+    # S4 (reactive jam) and S20 (hijack) are destructive — always opt-in
     if caps.can_central:        stages.update({5, 7, 8, 13})  # GATT enum/fuzz/PoC, SMP
     # S6 (MITM proxy) requires a second RF interface — always opt-in
     # S9 (packet injection) is destructive — always opt-in

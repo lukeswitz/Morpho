@@ -336,18 +336,34 @@ def _run_coordinator(
             )
 
         deadline = time.time() + ZIGBEE_COORD_SECS
-        # Poll for joins via stream() or sniff() if available.
+        import threading as _threading
+        _coord_stop = _threading.Event()
+
+        def _coord_stream_reader():
+            try:
+                for pkt in coord.stream():
+                    if _coord_stop.is_set():
+                        return
+                    addr = getattr(pkt, "src_addr", None) or getattr(pkt, "source", None)
+                    if addr:
+                        key_bytes = getattr(pkt, "network_key", None)
+                        _on_join(str(addr), bytes(key_bytes) if key_bytes else None)
+            except (AttributeError, TypeError):
+                # stream() not available — wait passively until stop event
+                _coord_stop.wait(timeout=ZIGBEE_COORD_SECS)
+            except Exception as exc:
+                if not _coord_stop.is_set():
+                    log.debug(f"[S11][coord] stream: {type(exc).__name__}: {exc}")
+
+        t = _threading.Thread(target=_coord_stream_reader, daemon=True)
+        t.start()
+        t.join(timeout=ZIGBEE_COORD_SECS)
+        _coord_stop.set()
         try:
-            for pkt in coord.stream():
-                if time.time() >= deadline:
-                    break
-                addr = getattr(pkt, "src_addr", None) or getattr(pkt, "source", None)
-                if addr:
-                    key_bytes = getattr(pkt, "network_key", None)
-                    _on_join(str(addr), bytes(key_bytes) if key_bytes else None)
-        except (AttributeError, TypeError):
-            # stream() not available — wait passively.
-            time.sleep(ZIGBEE_COORD_SECS)
+            coord.stop()
+        except Exception:
+            pass
+        t.join(timeout=3.0)
 
     except Exception as exc:
         log.warning(
