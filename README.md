@@ -1,7 +1,10 @@
-# RubyWaves
+<div align="center">
+<img width="500" alt="rubywaves" src="https://github.com/user-attachments/assets/2560fdc5-341a-4fdb-8160-73fb4ed4f6ac" />
 
 Multi-protocol wireless red team framework built on [WHAD](https://github.com/whad-team/whad-client). Runs a structured 21-stage assessment pipeline — BLE, ESB, Logitech Unifying, ZigBee, LoRaWAN, sub-GHz PHY, and Bluetooth Classic — with per-stage authorization gates, automatic hardware detection, SQLite findings storage, and Markdown/JSON reporting.
+</div>
 
+> [!IMPORTANT]
 > **Authorization required.** This tool transmits RF packets and connects to wireless devices. Only operate against equipment you own or have written authorization to test.
 
 ---
