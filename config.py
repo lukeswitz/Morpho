@@ -30,16 +30,25 @@ UNIFYING_DUCKY_SCRIPT: str | None = None # path to DuckyScript file for inject -
 ESB_PRX_TIMEOUT    = 30             # seconds to listen in PRX (passive ACK) mode
 ESB_PTX_PAYLOAD    = "050000000000" # hex payload bytes for PTX inject test
 ESB_REPLAY_FRAMES  = 5              # frames to capture in PRX before PTX replay
+ESB_PRX_ACK_PAYLOAD: str | None = None  # hex bytes to send as custom ACK per received frame
 
 # Stage 19 — Logitech Unifying Python API
-UNIFYING_MOUSE_MOVES  = 5                # mouse move demo steps
+UNIFYING_MOUSE_MOVES       = 5                # mouse move demo steps
+UNIFYING_MOUSE_RIGHT_CLICK = False            # also inject right_click() after left_click()
+UNIFYING_MOUSE_SCROLL_LINES = 0               # >0 = scroll up N lines; <0 = scroll down N lines
 UNIFYING_KBD_TEXT     = "Hello from WHAD" # text for Keyboard.send_text()
 UNIFYING_SYNC_TIMEOUT = 15               # seconds to wait for synchronize()
+
+# Stage 22 — RF4CE Remote Control Reconnaissance
+RF4CE_SNIFF_SECS = 30  # dwell per channel (channels 15, 20, 25)
 
 # Stage 11 — IEEE 802.15.4 / ZigBee
 ZIGBEE_SCAN_SECS    = 60   # informational total across all channels
 ZIGBEE_PER_CH_SECS  = 3    # dwell per channel (16 channels × 3s = 48s)
 ZIGBEE_COORD_SECS   = 60   # join window for rogue coordinator mode
+
+# Stage 23 — Raw IEEE 802.15.4 Reconnaissance
+DOT15D4_PER_CH_SECS = 5    # dwell per channel (16 channels × 5s = 80s)
 
 # Stage 12 — PHY / ISM Band Survey
 PHY_SWEEP_SECS       = 120  # informational total sweep budget

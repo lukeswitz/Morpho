@@ -1,7 +1,7 @@
 <div align="center">
 <img width="500" alt="rubywaves" src="https://github.com/user-attachments/assets/2560fdc5-341a-4fdb-8160-73fb4ed4f6ac" />
 
-Multi-protocol wireless red team framework built on [WHAD](https://github.com/whad-team/whad-client). Runs a structured 21-stage assessment pipeline — BLE, ESB, Logitech Unifying, ZigBee, LoRaWAN, sub-GHz PHY, and Bluetooth Classic — with per-stage authorization gates, automatic hardware detection, SQLite findings storage, and Markdown/JSON reporting.
+Multi-protocol wireless red team framework built on [WHAD](https://github.com/whad-team/whad-client). Runs a structured 23-stage assessment pipeline — BLE, ESB, Logitech Unifying, ZigBee, LoRaWAN, sub-GHz PHY, Bluetooth Classic, RF4CE, and raw 802.15.4 — with per-stage authorization gates, automatic hardware detection, SQLite findings storage, and Markdown/JSON reporting.
 </div>
 
 > [!IMPORTANT]
@@ -76,8 +76,8 @@ python main.py -n "Engagement1" -l "Building A"
 python main.py -n "Engagement1" -l "Building A" --stages 1,2,5,7,8,10,14
 
 # Enable all opt-in stages at once (4=jam, 6=proxy, 9=inject, 16=L2CAP,
-#   17=sub-GHz, 18=ESB active, 19=Unifying API, 20=hijack) — each still
-#   requires operator confirmation at the active-gate prompt
+#   17=sub-GHz, 18=ESB active, 19=Unifying API, 20=hijack, 22=RF4CE) — each
+#   still requires operator confirmation at the active-gate prompt
 python main.py -n "Engagement1" -l "Building A" --opt-in
 
 # Explicit opt-in stages without the flag
@@ -115,12 +115,12 @@ python main.py -n "Engagement1" --debug
 | 5 | GATT Enumeration + Shell | Active | Connects and enumerates full GATT profile; reads Battery, DIS, HeartRate services; exports writable handles and JSON profile to `reports/`. MTU negotiated to 247. After enumeration, operator is offered an **interactive GATT shell** (see below). |
 | 6 | MITM Proxy | Active | Transparent BLE MITM via `wble-proxy`. Optional `--link-layer` mode intercepts all L2CAP PDUs (SMP, ATT, signalling) — invisible to GATT-only monitors. Requires two RF interfaces (`--proxy-interface`). Always opt-in. |
 | 7 | GATT Write Fuzzer | Active | Feeds oversized/malformed payloads to all writable handles; identifies handles that accept arbitrary writes vs those that enforce length/type validation. |
-| 8 | Semantic PoC | Active | Targeted GATT writes — device rename (0x2A00, confirmed by read-back), alert trigger (0x2A06), HR control reset (0x2A39), proprietary channel probe (up to 5 unknown chars × 12 probe bytes), raw ATT PDU probe, inline LESC pairing escalation for auth-gated handles. |
-| 9 | Packet Injection | Active | ADV flood/replay via `wsniff`+`winject`; InjectaBLE PDU injection into live connections using S2 channel parameters (AA, CRC, hop). Always opt-in. |
-| 11 | ZigBee / 802.15.4 | Passive/Active | **Passive** — scans IEEE 802.15.4 channels 11–26, auto-decrypts, recovers network keys. **Coordinator** — creates rogue PAN and opens join window; devices that join without install-code enforcement reveal key material. **EndDevice** — joins a real PAN as a device, streams group traffic to prove open association. |
-| 12 | PHY ISM Survey | Passive | Sweeps 2402–2480 MHz in 2 MHz steps with GFSK; aggregates activity into 5 MHz bands; reports packet count and peak RSSI. |
+| 8 | Semantic PoC | Active | Targeted GATT writes — operator-specified device rename written to 0x2A00 (confirmed by read-back), alert trigger (0x2A06), HR control reset (0x2A39), proprietary channel probe (up to 5 unknown chars × 12 probe bytes), raw ATT PDU probe, inline LESC pairing escalation for auth-gated handles. |
+| 9 | Packet Injection | Active | Runtime mode prompt: **[A]** ADV flood/replay via `wsniff`+`winject` (scan DoS / advertisement cache poisoning); **[I]** InjectaBLE PDU injection into a live connection using S2 channel parameters (AA, CRC, hop) — if no S2 data exists, a live capture is offered before injection proceeds. Always opt-in. |
+| 11 | ZigBee / 802.15.4 | Passive/Active | Runtime mode prompt: **[P]** Passive — energy-detect channel survey across 11–26 then targeted sniff on active channels; `discover_networks()` extracts PAN IDs and coordinator addresses; auto-decrypts, recovers network keys. **[C]** Coordinator — `start_network()`/`network_formation()` creates rogue PAN, broadcasts beacon, opens join window; devices that join without install-code enforcement reveal key material. **[E]** EndDevice — joins a real PAN via `end_device.send()`, streams group traffic to prove open association. |
+| 12 | PHY ISM Survey | Passive | Sweeps 2402–2480 MHz in 2 MHz steps with GFSK; aggregates activity into 5 MHz bands; reports packet count and peak RSSI. **LoRa scan** — probes 433/868/915 MHz with SF7, SF9, and SF12 spreading factors to detect LoRa activity without a dedicated LoRa radio. |
 | 13 | SMP Pairing Scan | Active | Tests 4 pairing modes (LESC/Legacy × Just Works/Bonding); extracts distributed keys from security database; thread-guarded against pairing() hanging indefinitely. |
-| 15 | LoRaWAN Recon | Passive | Listens for JoinRequest (captures DevEUI, AppEUI, DevNonce), DataUp frames. Tests DevNonce replay. Requires external LoRa radio hardware (not nRF52840). |
+| 15 | LoRaWAN Recon | Passive | Python `_python_lorawan_sniff()` via `whad.lorawan.LWGateway` + sniff callbacks captures JoinRequest (DevEUI, AppEUI, DevNonce) and DataUp frames before falling back to CLI. Tests DevNonce replay. Requires external LoRa radio hardware (not nRF52840). |
 | 16 | L2CAP CoC | Active | Tests LE L2CAP Connection-Oriented Channels via Linux `AF_BLUETOOTH` sockets. Probes PSMs 0x0023–0x00FF for unauthenticated open channels; fuzzes accepted channels with malformed/oversized SDUs to detect buffer overflows. Prompts for target BD address at runtime. **Always opt-in.** |
 | 20 | BLE Connection Hijacker | Active | **InjectaBLE technique** — synchronises to a live BLE connection captured in S2 (Access Address, CRC init, channel map, hop parameters), evicts the legitimate Central via `LL_TERMINATE`, and takes over as Central. On successful hijack, opens an inline GATT shell against the hijacked peripheral. Requires `can_reactive_jam`. Always opt-in. |
 
@@ -146,10 +146,17 @@ After GATT enumeration (S5) or a successful hijack (S20), an embedded shell lets
 
 | Stage | Name | Mode | Description |
 |-------|------|------|-------------|
-| 10 | Logitech Unifying / MouseJack | Active | Four operator-selected modes: **sniff** (passive scan + keylog + `wanalyze keystroke pairing_cracking` pipeline on PCAP), **inject** (MouseJack text injection with locale), **ducky** (DuckyScript file playback via `wuni-keyboard -d`), **mouse** (scripted move+click or hardware relay via `wuni-mouse -d`). |
+| 10 | Logitech Unifying / MouseJack | Active | Four operator-selected modes: **sniff** (Python `whad.unifying.Sniffer` pre-flight for 10 s, then passive scan + keylog + `wanalyze keystroke pairing_cracking` pipeline on PCAP), **inject** (MouseJack text injection with locale), **ducky** (DuckyScript file playback via `wuni-keyboard -d`), **mouse** (scripted move+click or hardware relay via `wuni-mouse -d`). Python mouselog pre-flight runs before CLI in sniff mode. |
 | 14 | ESB Raw Scan | Passive | RfStorm: uses `whad.esb.Sniffer(channel=None)` — stable all-channel loop. nRF52840: uses `whad.esb.Scanner` with monkey-patch for kwargs bug. Flags low-entropy (plaintext) payloads. |
-| 18 | ESB PRX/PTX Active | Active | **PRX** — listen as Primary Receiver for frames addressed to a device, capture and entropy-check content. **PTX** — `synchronize()` to device channel then `send_data(waiting_ack=True)` to inject unauthenticated frames; ACK confirmation reported. Always opt-in. |
-| 19 | Unifying Python API | Active | `whad.unifying.Mouse` and `whad.unifying.Keyboard` connectors. **Mouse** mode: `synchronize()` + move spiral + left click. **Keyboard** mode: `synchronize()` + `send_text()`. **Ducky** mode: full DuckyScript parser (STRING, ENTER, DELAY, modifier keys) via `Keyboard.send_key()`. Always opt-in. |
+| 18 | ESB PRX/PTX Active | Active | **PRX** — listen as Primary Receiver for frames addressed to a device; `prepare_acknowledgment()` arms a reply payload in the PRX stream loop; capture and entropy-check content. **PTX** — `synchronize()` to device channel then `send_data(waiting_ack=True)` to inject unauthenticated frames; ACK confirmation reported. Always opt-in. |
+| 19 | Unifying Python API | Active | `whad.unifying.Mouse` and `whad.unifying.Keyboard` connectors. Sub-modes: **Dongle** (raw `whad.unifying.Dongle` enumeration) and **Injector** (low-level `whad.unifying.Injector`). **Mouse** mode: `synchronize()` + move spiral + left click. **Keyboard** mode: `synchronize()` + `send_text()`; exposes `keyboard.key` and `aes_counter` introspection. **Ducky** mode: full DuckyScript parser (STRING, ENTER, DELAY, modifier keys, volume tokens VOLUMEUP/VOLUMEDOWN/MUTE) via `Keyboard.send_key()`. Always opt-in. |
+
+### Raw 802.15.4 / RF4CE Stages (uart0 / ButteRFly)
+
+| Stage | Name | Mode | Description |
+|-------|------|------|-------------|
+| 22 | RF4CE Recon | Passive | Scans IEEE 802.15.4 channels 15, 20, and 25 (RF4CE band plan) using `whad.rf4ce` if available, falling back to raw `whad.dot15d4`. Identifies remote control / set-top-box pairing frames; records node addresses and PAN IDs. **Always opt-in.** |
+| 23 | Raw 802.15.4 Survey | Passive | Full 16-channel (11–26) raw 802.15.4 scan using `whad.dot15d4`. Protocol classifier tags each frame as ZigBee, Thread, WirelessHART, RF4CE, or Unknown based on frame fields. Reports per-channel activity, frame counts, and unique source addresses. Auto-selected whenever S11 (ZigBee) is selected. |
 
 ### Sub-GHz PHY Stage (yardstickone0 / YardStickOne)
 
@@ -172,16 +179,17 @@ When `--stages auto` (default), the framework probes hardware capabilities after
 - **BLE stages** 1, 2, 3, 5, 7, 8, 13 selected by `can_scan`, `can_sniff`, `can_peripheral`, `can_central` flags
 - **S10 / S14** selected when any connected dongle has `can_unifying` / `can_esb`
 - **S11 / S12 / S15** selected by `can_zigbee`, `can_phy`, `can_lorawan`
-- **S17** selected when a YardStickOne is detected
+- **S23** auto-selected whenever S11 is selected (`can_zigbee`)
+- **S17** auto-selected when a YardStickOne is detected; also included in `--opt-in` for explicit stage lists without hardware
 - **S21** selected when an HCI adapter or Ubertooth One is detected
-- **Opt-in stages** (4, 6, 9, 16, 17, 18, 19, 20) are **never auto-selected** — use `--opt-in` or explicit `--stages N`
+- **Opt-in stages** (4, 6, 9, 16, 18, 19, 20, 22) are **never auto-selected** — use `--opt-in` or explicit `--stages N`
 
 ```
 # Full hardware (ButteRFly + rfstorm0 + yardstickone0 + ubertooth0):
-Auto-selected stages : 1, 2, 3, 5, 7, 8, 10, 11, 12, 13, 14, 17, 21
+Auto-selected stages : 1, 2, 3, 5, 7, 8, 10, 11, 12, 13, 14, 17, 21, 23
 
 # With --opt-in:
-Auto-selected stages : 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19, 20, 21
+Auto-selected stages : 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19, 20, 21, 22, 23
 ```
 
 ---
@@ -194,9 +202,11 @@ Auto-selected stages : 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18
 | `ESB_INTERFACE` | auto | ESB/Unifying dongle (auto-detected rfstorm0) |
 | `PHY_SUBGHZ_INTERFACE` | auto | Sub-GHz PHY dongle (auto-detected yardstickone0) |
 | `UBERTOOTH_INTERFACE` | auto | Passive BLE sniffer (auto-detected ubertooth0) |
+| `PROXY_INTERFACE` | `hci0` | Second interface for S6 MITM proxy |
 | `SCAN_DURATION` | 120 | Stage 1 BLE scan seconds |
 | `RSSI_MIN_FILTER` | 0 | Ignore devices weaker than N dBm (0 = off) |
 | `ACTIVE_GATE` | True | Require `yes` confirmation before active stages |
+| `VERBOSE_MODE` | False | Print WHAD narration lines — useful for training/classroom demos |
 | `UNIFYING_LOCALE` | `us` | Keyboard locale for `wuni-keyboard -l` |
 | `UNIFYING_DUCKY_SCRIPT` | None | Path to DuckyScript file for S10 ducky / S19 ducky mode |
 | `UNIFYING_KBD_TEXT` | `Hello from WHAD` | S19 keyboard injection text |
@@ -204,6 +214,7 @@ Auto-selected stages : 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18
 | `ESB_PTX_PAYLOAD` | `050000000000` | S18 PTX injection payload (hex) |
 | `SUBGHZ_SWEEP_SECS` | 120 | S17 total sweep budget |
 | `SUBGHZ_PER_FREQ_SECS` | 2 | S17 dwell time per frequency |
+| `LORAWAN_REGION` | `EU868` | S15 LoRaWAN regional plan (`EU868` or `US915`) |
 | `ZIGBEE_COORD_SECS` | 60 | S11 coordinator join window (seconds) |
 | `S3_SPAWN_MODE` | False | Use transparent `wble-spawn` relay in S3 instead of static clone |
 
@@ -259,6 +270,10 @@ Auto-selected stages : 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18
 | `btc_exposed_services` | medium | 21 |
 | `btc_weak_security_mode` | high | 21 |
 | `btc_piconet_sniffed` | high | 21 |
+| `rf4ce_device_discovered` | medium | 22 |
+| `rf4ce_pairing_frame` | high | 22 |
+| `dot15d4_rf_activity` | info | 23 |
+| `dot15d4_protocol_classified` | info | 23 |
 
 ---
 

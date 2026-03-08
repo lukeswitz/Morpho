@@ -1,10 +1,8 @@
 import argparse
 import shutil
-import sys
 import time
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 
 from core.dongle import WhadDongle, HardwareMap, DongleCaps, detect_hardware
 from core.db import init_db, upsert_engagement
@@ -14,8 +12,126 @@ import config
 log = get_logger("main")
 
 
+_INNER = 62  # inner content width between │/║ border chars
+
+
+def _lj(s: str, n: int) -> str:
+    return s[:n].ljust(n)
+
+
+_STAGE_GROUPS: list[tuple[str, list[tuple[str, str, str, str]]]] = [
+    ("BLE  ·  uart0 / nRF52840", [
+        ("01", "environment mapping",      "passive",  ""),
+        ("02", "connection intelligence",  "passive",  ""),
+        ("03", "identity cloning",         "active",   ""),
+        ("04", "reactive jamming",         "active*",  ""),
+        ("05", "gatt enum + shell",        "active",   ""),
+        ("06", "mitm proxy",               "active*",  ""),
+        ("07", "gatt write fuzzer",        "active",   ""),
+        ("08", "semantic poc",             "active",   ""),
+        ("09", "packet injection",         "active*",  ""),
+        ("13", "smp pairing scan",         "active",   ""),
+        ("16", "l2cap coc",                "active*",  ""),
+        ("20", "ble connection hijacker",  "active*",  ""),
+    ]),
+    ("802.15.4  ·  uart0 / nRF52840", [
+        ("11", "zigbee recon",             "passive",  ""),
+        ("12", "phy ism survey (2.4GHz)",  "passive",  ""),
+        ("23", "raw 802.15.4 survey",      "passive",  "[+s11]"),
+    ]),
+    ("ESB / UNIFYING  ·  rfstorm0  →  uart0 fallback", [
+        ("10", "unifying / mousejack",     "active",   ""),
+        ("14", "esb raw scan",             "passive",  ""),
+        ("18", "esb prx/ptx",              "active*",  ""),
+        ("19", "unifying python api",      "active*",  ""),
+        ("22", "rf4ce recon",              "passive*", ""),
+    ]),
+    ("LORAWAN  ·  external LoRa radio", [
+        ("15", "lorawan recon",            "passive",  ""),
+    ]),
+    ("SUB-GHz  ·  yardstickone0", [
+        ("17", "sub-ghz phy survey",       "passive*", ""),
+    ]),
+    ("BLUETOOTH CLASSIC  ·  hci / ubertooth0", [
+        ("21", "br/edr scout",             "passive",  ""),
+    ]),
+]
+
+
+def _render_stage_box(title: str, rows: list[tuple[str, str, str, str]]) -> list[str]:
+    title_pad = _INNER - 3 - len(title)
+    lines = [f"  ┌─ {title} {'─' * title_pad}┐"]
+    for num, name, mode, note in rows:
+        # 2+2+2+24+2+8+2+6+14 = 62 = _INNER
+        content = f"  {num}  {_lj(name, 24)}  {_lj(mode, 8)}  {_lj(note, 6)}{'':14}"
+        lines.append(f"  │{content}│▒")
+    lines += [
+        f"  └{'─' * _INNER}┘▒",
+        f"   {'▒' * (_INNER + 2)}",
+        "",
+    ]
+    return lines
+
+
+def _help_text() -> str:
+    eq = "═" * _INNER
+    lines: list[str] = [
+        "",
+        f"  ╔{eq}╗",
+        f"  ║{'':62}║",
+        f"  ║{'':17}╦═╗ ╔═╗ ╔╦╗ ╔╦╗ ╔═╗ ╔═╗ ╔╦╗{'':18}║",
+        f"  ║{'':17}╠╦╝ ╠╣  ║║║  ║  ╠╣  ╠═╣ ╠╩╗{'':18}║",
+        f"  ║{'':17}╩╚═ ╚═╝ ╚╩╝  ╩  ╚═╝ ╩ ╩ ╩ ╩{'':18}║",
+        f"  ║{'':62}║",
+        f"  ║   wireless multi-protocol assessment  ·  23 stages{'':11}║",
+        f"  ║{'':62}║",
+        f"  ╚{eq}╝",
+        "",
+        "  usage: python main.py -n <name> -l <location> [options]",
+        "",
+    ]
+    for group_title, stages in _STAGE_GROUPS:
+        lines += _render_stage_box(group_title, stages)
+    lines += [
+        "  * opt-in stage  ·  requires --opt-in or explicit --stages N",
+        "  [+s11] auto-selected alongside stage 11 (zigbee)",
+        "",
+        f"  OPTIONS {'─' * 56}",
+        "",
+        "    -n, --name NAME               engagement name (for reporting)",
+        "    -l, --location LOC            physical location",
+        "    -e, --engagement ID           engagement id  [auto-generated]",
+        "    -i, --interface IFACE         ble interface  [uart0]",
+        "        --esb-interface IFACE     esb/unifying  [auto: rfstorm0]",
+        "        --phy-interface IFACE     sub-ghz phy  [auto: yardstickone0]",
+        "        --ubertooth-interface     passive ble sniffer  [auto]",
+        "        --proxy-interface IFACE   second iface for s6 mitm  [auto]",
+        "        --stages N,N,...          stage list or 'auto'  [auto]",
+        "        --opt-in                  enable all opt-in stages",
+        "        --no-gate                 skip active-stage prompts",
+        "        --target BD_ADDR          focus address (repeat ×n)",
+        "        --scan-duration SECS      s1 ble scan duration  [120]",
+        "        --debug                   debug logging",
+        "",
+        f"  EXAMPLES {'─' * 55}",
+        "",
+        '    python main.py -n "Lobby" -l "Floor 1"',
+        '    python main.py -n "Lobby" -l "Floor 1" --opt-in',
+        '    python main.py -n "Lab" --stages 1,5,7,8',
+        '    python main.py -n "Lab" --stages 1,2 --no-gate',
+        '    python main.py -n "Survey" --stages 14,17 --esb-interface rfstorm0',
+        "",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+class _StyledParser(argparse.ArgumentParser):
+    def format_help(self) -> str:
+        return _help_text()
+
+
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(
+    p = _StyledParser(
         description="BLE Red Team Framework — butterfly-ble-redteam"
     )
     p.add_argument(
@@ -56,11 +172,13 @@ def _parse_args() -> argparse.Namespace:
             "dongle capabilities (default: auto). "
             "1=BLE scan, 2=conn intel, 3=clone, 5=GATT enum, 7=fuzz, "
             "8=PoC, 10=Unifying (sniff/inject/ducky/mouse), "
-            "11=ZigBee, 12=PHY, 13=SMP pairing, 14=ESB passive, 15=LoRaWAN, 21=BR/EDR scout. "
+            "11=ZigBee, 12=PHY, 13=SMP pairing, 14=ESB passive, 15=LoRaWAN, "
+            "21=BR/EDR scout, 23=raw 802.15.4 recon (all protocols). "
             "Opt-in (require --opt-in or explicit --stages N): "
             "4=jam, 6=proxy (needs 2 interfaces), 9=BLE injection, 16=L2CAP CoC, "
             "17=sub-GHz PHY (YardStickOne), 18=ESB PRX/PTX (rfstorm), "
-            "19=Unifying Python API (rfstorm), 20=BLE hijacker."
+            "19=Unifying Python API (rfstorm), 20=BLE hijacker, "
+            "22=RF4CE recon (802.15.4 ch 15/20/25)."
         ),
     )
     p.add_argument(
@@ -68,7 +186,8 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "Enable all opt-in stages (4=jam, 6=MITM proxy, 9=inject, 16=L2CAP, "
-            "17=sub-GHz, 18=ESB active, 19=Unifying API, 20=BLE hijack). "
+            "17=sub-GHz, 18=ESB active, 19=Unifying API, 20=BLE hijack, "
+            "22=RF4CE recon). "
             "Each still requires operator confirmation at runtime via active-gate. "
             "Combine with --stages to add opt-in stages to an explicit list."
         ),
@@ -119,7 +238,7 @@ def _parse_args() -> argparse.Namespace:
 
 # Stages that require explicit operator opt-in (never auto-selected).
 # Each still prompts via active-gate when it runs.
-_OPT_IN_STAGES: frozenset[int] = frozenset({4, 6, 9, 16, 17, 18, 19, 20})
+_OPT_IN_STAGES: frozenset[int] = frozenset({4, 6, 9, 16, 17, 18, 19, 20, 22})
 
 
 def _apply_args(args: argparse.Namespace) -> None:
@@ -727,6 +846,27 @@ def main() -> None:
             stage_banner(21, "Bluetooth Classic (BR/EDR) Scout", passive=True)
             s21_btclassic.run(hw, eng_id)
 
+        if 22 in stages_requested:
+            from stages import s22_rf4ce
+
+            _rf4ce_dev = hw.esb_dongle or hw.ble_dongle
+            if _rf4ce_dev is None:
+                log.warning(
+                    "[S22] No ESB or BLE device available — RF4CE stage skipped."
+                )
+            else:
+                stage_banner(22, "RF4CE Remote Control Recon", passive=True)
+                s22_rf4ce.run(hw, eng_id)
+
+        if 23 in stages_requested:
+            if hw.ble_dongle is None:
+                log.warning("[S23] No BLE device available — raw 802.15.4 stage skipped.")
+            else:
+                from stages import s23_dot15d4
+
+                stage_banner(23, "Raw IEEE 802.15.4 Reconnaissance", passive=True)
+                s23_dot15d4.run(hw.ble_dongle, eng_id)
+
     except KeyboardInterrupt:
         log.info("Run aborted by user.")
     finally:
@@ -763,7 +903,7 @@ def _stages_from_hardware(hw: HardwareMap) -> set[int]:
     _esb_caps = hw.esb_dongle.caps if hw.esb_dongle else caps
     if _esb_caps.can_unifying or caps.can_unifying:
         stages.add(10)                                       # Logitech Unifying/MouseJack
-    if caps.can_zigbee:         stages.add(11)              # ZigBee/802.15.4 recon
+    if caps.can_zigbee:         stages.update({11, 23})     # ZigBee recon + raw 802.15.4 recon
     if caps.can_phy:            stages.add(12)              # PHY 2.4 GHz ISM band survey
     if _esb_caps.can_esb or caps.can_esb:
         stages.add(14)                                       # ESB raw channel scan
@@ -771,6 +911,7 @@ def _stages_from_hardware(hw: HardwareMap) -> set[int]:
     if hw.phy_dongle is not None:
         stages.add(17)                                       # sub-GHz PHY (YardStickOne)
     # S18 (ESB PRX/PTX) + S19 (Unifying API) are always opt-in — not auto-selected
+    # S22 (RF4CE recon) is opt-in — requires explicit --stages 22 or --opt-in
     # S21 (BR/EDR) auto-selected when HCI or Ubertooth present
     if hw.ubertooth_dongle is not None or _hci_available():
         stages.add(21)
@@ -819,6 +960,8 @@ def _warn_unsupported_stages(stages: set[int], hw: HardwareMap) -> None:
         18: ("can_esb",         "ESB module (PRX/PTX)"),
         19: ("can_unifying",    "Unifying module"),
         20: ("can_reactive_jam", "ReactiveJam (BLE Hijacker)"),
+        22: ("can_zigbee",      "ZigBee/dot15d4 module (RF4CE)"),
+        23: ("can_zigbee",      "dot15d4 module (raw 802.15.4)"),
     }
     for s in sorted(stages):
         if s == 17:
