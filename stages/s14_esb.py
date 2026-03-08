@@ -212,8 +212,34 @@ def _scan_with_scanner(dongle: WhadDongle, engagement_id: str) -> None:
     deadline = time.time() + config.ESB_SCAN_SECS
     scan_ok = True
 
+    _discovered_via_api = False
     try:
-        while time.time() < deadline and scan_ok:
+        log.debug("[S14] Trying ESB Scanner.discover_devices()...")
+        for dev in scanner.discover_devices():
+            addr = getattr(dev, "address", None) or getattr(dev, "bd_address", None) or str(dev)
+            channel = getattr(dev, "channel", None)
+            rssi = getattr(dev, "rssi", None)
+            log.info(f"[S14][scan] ESB device: addr={addr} ch={channel} rssi={rssi}")
+            if addr not in devices:
+                devices[addr] = {
+                    "channels": set(),
+                    "packet_count": 0,
+                    "sample_hex": "",
+                }
+                log.info(f"[S14][scanner] New ESB device: {addr} on ch {channel}")
+            if channel is not None:
+                devices[addr]["channels"].add(channel)
+            devices[addr]["packet_count"] += 1
+            _discovered_via_api = True
+            if time.time() >= deadline:
+                break
+    except (AttributeError, NotImplementedError, TypeError) as exc:
+        log.debug(f"[S14] discover_devices() not available: {exc} — using wait_packet loop")
+    except Exception as exc:
+        log.debug(f"[S14] discover_devices() error: {exc} — using wait_packet loop")
+
+    try:
+        while not _discovered_via_api and time.time() < deadline and scan_ok:
             for ch in _ESB_CHANNELS:
                 if time.time() >= deadline:
                     break

@@ -46,23 +46,38 @@ def run(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
         return
 
     addr = target.bd_address
-    rand_flag = "-r" if target.address_type != "public" else ""
-    _pcap = pcap_path(engagement_id, 6, addr)
-    live_wireshark = _ask_wireshark()
+    _pcap = pcap_path(engagement_id, 6, addr).resolve()
 
-    wireshark_flag = "-w" if live_wireshark else ""
     link_layer_mode = _ask_link_layer()
     ll_flag = "--link-layer" if link_layer_mode else ""
-    cmd = (
-        f"wble-proxy"
-        f" -i {config.INTERFACE}"
-        f" -p {config.PROXY_INTERFACE}"
-        f" {rand_flag}"
-        f" {wireshark_flag}"
-        f" {ll_flag}"
-        f" -o {_pcap}"
-        f" {addr}"
-    )
+    # wdump is the canonical WHAD tool for writing PCAPs. Pipe wble-proxy output
+    # into wdump so packets are captured regardless of Wireshark availability.
+    # --force overwrites any existing file from a previous run.
+    # Give the proxy 2 minutes to find the target device (default is 30s).
+    # The overall subprocess timeout (PROXY_TIMEOUT) remains the cap.
+    discovery_timeout = min(120, PROXY_TIMEOUT // 2)
+    if shutil.which("wdump"):
+        cmd = (
+            f"wble-proxy"
+            f" -i {config.INTERFACE}"
+            f" -p {config.PROXY_INTERFACE}"
+            f" {ll_flag}"
+            f" -t {discovery_timeout}"
+            f" {addr}"
+            f" | wdump --force {_pcap}"
+        )
+    else:
+        # Fallback: use wble-proxy's -o flag if wdump is unavailable
+        cmd = (
+            f"wble-proxy"
+            f" -i {config.INTERFACE}"
+            f" -p {config.PROXY_INTERFACE}"
+            f" {ll_flag}"
+            f" -t {discovery_timeout}"
+            f" -o {_pcap}"
+            f" {addr}"
+        )
+        log.warning("[S6] wdump not found — using -o flag (PCAP may not be written)")
     if link_layer_mode:
         log.info(
             "[S6] Link-layer mode active: all L2CAP PDUs (not just GATT) "
@@ -73,40 +88,36 @@ def run(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
     log.info(f"[S6] Attack interface : {config.INTERFACE}")
     log.info(f"[S6] Proxy interface  : {config.PROXY_INTERFACE}")
     log.info(f"[S6] PCAP output      : {_pcap}")
-    if live_wireshark:
-        log.info("[S6] Wireshark will launch automatically (-w)")
     log.debug(f"[S6] Command: {cmd}")
 
     dongle.device.close()
     import time as _time
-    _time.sleep(0.5)
+    _pcap.parent.mkdir(parents=True, exist_ok=True)
+    _wait_for_port_free(config.INTERFACE)
 
-    stdout = ""
-    stderr = ""
     returncode = -1
-
+    # Run with inherited stdout/stderr so the operator sees live proxy output.
+    # Do NOT use capture_output — it suppresses wble-proxy's status lines.
+    log.info("[S6] Proxy running — press Ctrl+C to stop.")
     try:
         result = subprocess.run(
             cmd,
             shell=True,
-            capture_output=True,
-            text=True,
             timeout=PROXY_TIMEOUT,
         )
-        stdout = result.stdout
-        stderr = result.stderr
         returncode = result.returncode
     except subprocess.TimeoutExpired:
         log.info(f"[S6] Proxy session ended after {PROXY_TIMEOUT}s timeout.")
+    except KeyboardInterrupt:
+        log.info("[S6] Proxy interrupted by operator.")
     except Exception as exc:
         log.error(f"[S6] Subprocess error: {type(exc).__name__}: {exc}")
     finally:
         _reopen_dongle(dongle)
 
-    if stderr.strip():
-        log.debug(f"[S6] wble-proxy stderr: {stderr.strip()[:240]}")
-
-    data_intercepted, connections_accepted = _parse_proxy_output(stdout)
+    # Infer basic results from PCAP size — we no longer parse stdout
+    data_intercepted = _pcap.exists() and _pcap.stat().st_size > 1024
+    connections_accepted = _pcap.exists() and _pcap.stat().st_size > 0
 
     log.info(
         f"[S6] Proxy complete: "
@@ -137,22 +148,6 @@ def _ask_link_layer() -> bool:
     try:
         raw = input(
             "\n  Use link-layer proxy mode (all L2CAP, not just GATT)? [y/N]: "
-        ).strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        return False
-    return raw in ("y", "yes")
-
-
-def _ask_wireshark() -> bool:
-    """Prompt operator to launch Wireshark live during the proxy session.
-
-    Returns True if operator wants live Wireshark (-w flag), False otherwise.
-    """
-    if not shutil.which("wireshark"):
-        return False
-    try:
-        raw = input(
-            "\n  Launch Wireshark live during proxy session? [y/N]: "
         ).strip().lower()
     except (EOFError, KeyboardInterrupt):
         return False
@@ -290,6 +285,97 @@ def _discover_interfaces() -> list[tuple[str, str]]:
     return found
 
 
+def _interface_to_devpath(interface: str) -> str | None:
+    """Map e.g. 'uart0' → '/dev/ttyACM0' by parsing whadup Identifier line."""
+    try:
+        result = subprocess.run(
+            ["whadup"], capture_output=True, text=True, timeout=5
+        )
+        capture = False
+        for line in result.stdout.splitlines():
+            stripped = line.strip()
+            if stripped == f"- {interface}":
+                capture = True
+            elif capture and stripped.startswith("Identifier:"):
+                return stripped.split("Identifier:", 1)[-1].strip()
+            elif capture and stripped.startswith("- "):
+                break
+    except Exception:
+        pass
+    return None
+
+
+def _usb_reset_device(serial_dev: str) -> bool:
+    """Issue a USB hardware reset on the device backing serial_dev (e.g. /dev/ttyACM0).
+
+    The ButteRFly firmware does not re-emit DeviceReady in response to WHAD's
+    software reset command after a previous session closes. A USB-level reset
+    forces the firmware to fully reboot so it emits DeviceReady fresh when
+    wble-proxy opens the port next.
+
+    Returns True if the reset was issued successfully, False otherwise.
+    """
+    import fcntl
+    import os as _os
+    USBDEVFS_RESET = ord("U") << 8 | 20
+    try:
+        tty_name = serial_dev.split("/")[-1]   # e.g. ttyACM0
+        sysfs = f"/sys/class/tty/{tty_name}/device"
+        if not _os.path.exists(sysfs):
+            return False
+        # Walk up two levels: .../ttyACM0/device -> interface -> usb device
+        usb_dir = _os.path.realpath(sysfs + "/../..")
+        bus = int(open(f"{usb_dir}/busnum").read().strip())
+        dev = int(open(f"{usb_dir}/devnum").read().strip())
+        usb_path = f"/dev/bus/usb/{bus:03d}/{dev:03d}"
+        fd = _os.open(usb_path, _os.O_WRONLY)
+        fcntl.ioctl(fd, USBDEVFS_RESET, 0)
+        _os.close(fd)
+        log.debug(f"[S6] USB reset issued on {usb_path} (for {serial_dev})")
+        return True
+    except Exception as exc:
+        log.debug(f"[S6] USB reset unavailable: {exc}")
+        return False
+
+
+def _wait_for_port_free(interface: str, fuser_timeout: float = 6.0) -> None:
+    """Close the ButteRFly cleanly and wait until wble-proxy can open it.
+
+    The ButteRFly firmware does not respond to WHAD's software DeviceReset
+    command after an existing session closes — wble-proxy always times out and
+    reports 'uart0 not found'. The only reliable fix is a USB hardware reset,
+    which reboots the firmware so it emits DeviceReady fresh.
+
+    Sequence:
+    1. Poll fuser until the OS releases the serial FD.
+    2. Issue USBDEVFS_RESET via ioctl to force a firmware reboot.
+    3. Wait 3s for USB re-enumeration + firmware boot.
+    Falls back to a plain 5s sleep if the USB path can't be resolved.
+    """
+    import time as _time
+    dev_path = _interface_to_devpath(interface)
+    if dev_path is None:
+        log.debug("[S6] Could not resolve device path — sleeping 5s")
+        _time.sleep(5.0)
+        return
+
+    # Phase 1: wait for OS to release the FD after dongle.device.close()
+    if shutil.which("fuser"):
+        deadline = _time.time() + fuser_timeout
+        while _time.time() < deadline:
+            result = subprocess.run(["fuser", dev_path], capture_output=True)
+            if result.returncode != 0:
+                log.debug(f"[S6] OS released {dev_path}")
+                break
+            _time.sleep(0.25)
+
+    # Phase 2: USB hardware reset to force ButteRFly firmware reboot
+    reset_ok = _usb_reset_device(dev_path)
+    settle = 3.0 if reset_ok else 5.0
+    log.debug(f"[S6] Waiting {settle}s for firmware {'reboot' if reset_ok else 'settle'}…")
+    _time.sleep(settle)
+
+
 def _reopen_dongle(dongle: WhadDongle) -> None:
     """Re-attach the underlying WhadDevice, polling every 0.5s up to 6s."""
     import time as _time
@@ -310,27 +396,6 @@ def _reopen_dongle(dongle: WhadDongle) -> None:
         f"[S6] Could not reopen WHAD device after 6s "
         f"({type(last_exc).__name__}: {last_exc!r})"
     )
-
-
-def _parse_proxy_output(stdout: str) -> tuple[bool, bool]:
-    """Heuristically extract connection/data signals from wble-proxy stdout.
-
-    Returns:
-        (data_intercepted, connections_accepted)
-
-    NOTE: wble-proxy output format is not fully documented. Adjust keywords
-    after first live test by inspecting actual stdout with log.debug().
-    """
-    lo = stdout.lower()
-    connections_accepted = any(
-        kw in lo
-        for kw in ("connection established", "connected", "accepted", "central connected")
-    )
-    data_intercepted = any(
-        kw in lo
-        for kw in ("intercepted", "forwarded", "bytes", "read request", "write request")
-    )
-    return data_intercepted, connections_accepted
 
 
 def _record_finding(

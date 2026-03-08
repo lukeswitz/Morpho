@@ -119,8 +119,12 @@ def _hcitool_scan(duration: int) -> list[dict]:
     """Run `hcitool scan` and return list of {addr, name} dicts."""
     devices: list[dict] = []
     try:
+        # --length units are 1.28 seconds (Bluetooth inquiry periods).
+        # duration // 1280 was wrong (gave 0 for 30s → only 1.28s scan).
+        # Correct: duration * 100 // 128  (e.g. 30s → 23 units → 29.4s)
+        length_units = max(1, duration * 100 // 128)
         result = subprocess.run(
-            ["hcitool", "scan", "--flush", "--length", str(max(1, duration // 1280))],
+            ["hcitool", "scan", "--flush", "--length", str(length_units)],
             capture_output=True, text=True, timeout=duration + 10,
         )
         for line in result.stdout.splitlines():

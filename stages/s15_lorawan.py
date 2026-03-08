@@ -47,6 +47,233 @@ for _lora_path in ("whad.lorawan", "whad.lorawan.gateway"):
     except ImportError:
         continue
 
+# Try the structured LWGateway Python API (separate from the legacy Gateway probe)
+try:
+    from whad.lorawan import LWGateway as _LWGateway
+    _LWGATEWAY_AVAILABLE = True
+except ImportError:
+    _LWGateway = None  # type: ignore[assignment,misc]
+    _LWGATEWAY_AVAILABLE = False
+
+
+# ── LWGateway native path ─────────────────────────────────────────────────────
+
+class _CaptureApp:
+    """Minimal LoRaWAN application that accumulates join requests and uplinks."""
+
+    def __init__(self) -> None:
+        self.joins: list[dict] = []
+        self.uplinks: list[dict] = []
+
+    def on_join_request(self, devEUI: bytes, appEUI: bytes, devNonce: int) -> None:
+        entry = {
+            "dev_eui": devEUI.hex() if isinstance(devEUI, (bytes, bytearray)) else str(devEUI),
+            "app_eui": appEUI.hex() if isinstance(appEUI, (bytes, bytearray)) else str(appEUI),
+            "dev_nonce": hex(devNonce) if isinstance(devNonce, int) else str(devNonce),
+        }
+        self.joins.append(entry)
+        log.info(
+            f"[S15/native] Join Request: DevEUI={entry['dev_eui']} "
+            f"AppEUI={entry['app_eui']} Nonce={entry['dev_nonce']}"
+        )
+
+    def on_uplink(self, devAddr: int, data: bytes, fcnt: int) -> None:
+        entry = {
+            "dev_addr": hex(devAddr) if isinstance(devAddr, int) else str(devAddr),
+            "payload": data.hex() if isinstance(data, (bytes, bytearray)) else str(data),
+            "fcnt": fcnt,
+        }
+        self.uplinks.append(entry)
+        log.info(
+            f"[S15/native] Uplink: DevAddr={entry['dev_addr']} "
+            f"FCnt={entry['fcnt']} payload={entry['payload'][:16]}"
+        )
+
+
+def _build_channel_plan(region: str):
+    """Return a minimal channel-plan object for LWGateway.
+
+    LWGateway expects a channel plan class or instance. We attempt to import
+    a named plan from whad.lorawan first; if that fails we return None so the
+    caller can pass the region string directly and let LWGateway use its default.
+    """
+    plan_names_by_region: dict[str, list[str]] = {
+        "EU868": ["EU868ChannelPlan", "EU868Plan", "EU868"],
+        "US915": ["US915ChannelPlan", "US915Plan", "US915"],
+    }
+    names = plan_names_by_region.get(region, plan_names_by_region["EU868"])
+    for mod_path in ("whad.lorawan.channel_plans", "whad.lorawan.channels", "whad.lorawan"):
+        try:
+            import importlib as _il
+            mod = _il.import_module(mod_path)
+            for name in names:
+                plan = getattr(mod, name, None)
+                if plan is not None:
+                    log.debug(f"[S15/native] Using channel plan {mod_path}.{name}")
+                    return plan
+        except ImportError:
+            continue
+    log.debug("[S15/native] No named channel plan found; passing region string to LWGateway")
+    return region
+
+
+def _run_lorawan_gateway_native(dongle: WhadDongle, engagement_id: str) -> bool:
+    """Run LoRaWAN capture using the whad.lorawan.LWGateway Python API.
+
+    Returns True if the native path ran (even if it captured nothing), False if
+    LWGateway is unavailable or failed to initialise so the caller can fall back.
+    """
+    if not _LWGATEWAY_AVAILABLE:
+        return False
+
+    region = config.LORAWAN_REGION
+    duration = config.LORAWAN_SNIFF_SECS
+    channel_plan = _build_channel_plan(region)
+    app = _CaptureApp()
+
+    log.info(
+        f"[S15] LWGateway native path — region={region} "
+        f"duration={duration}s ..."
+    )
+
+    gw = None
+    try:
+        gw = _LWGateway(dongle.device, channel_plan, app)
+    except TypeError:
+        # Some LWGateway versions take only (device, app) without a channel plan
+        try:
+            gw = _LWGateway(dongle.device, app)
+        except Exception as exc:
+            log.warning(
+                f"[S15] LWGateway init failed: {type(exc).__name__}: {exc}. "
+                "Falling back to legacy path."
+            )
+            return False
+    except Exception as exc:
+        log.warning(
+            f"[S15] LWGateway init failed: {type(exc).__name__}: {exc}. "
+            "Falling back to legacy path."
+        )
+        return False
+
+    try:
+        deadline = time.time() + duration
+        # LWGateway is callback-driven; start() begins listening and callbacks
+        # fire on the app object. We simply sleep until the deadline.
+        gw.start()
+        log.info(f"[S15] LWGateway started — listening for {duration}s ...")
+        while time.time() < deadline:
+            time.sleep(1.0)
+    except Exception as exc:
+        log.warning(f"[S15] LWGateway runtime error: {type(exc).__name__}: {exc}")
+    finally:
+        try:
+            gw.stop()
+        except Exception:
+            pass
+
+    # Convert _CaptureApp uplinks into the data_frames format expected by the
+    # shared finding/analysis helpers.
+    join_requests = app.joins
+    data_frames = [
+        {
+            "dev_addr": u["dev_addr"],
+            "fcnt": str(u["fcnt"]),
+            "raw_hex": u["payload"][:32],
+        }
+        for u in app.uplinks
+    ]
+
+    _record_findings(engagement_id, join_requests, data_frames)
+    if data_frames:
+        _analyze_fcnt(data_frames, engagement_id)
+    _print_summary(region, join_requests, data_frames)
+
+    if join_requests:
+        # Replay test needs raw_hex; native path doesn't capture raw frames,
+        # so we skip it here — the legacy path handles raw_hex when available.
+        log.debug("[S15] Replay test skipped on native LWGateway path (no raw frame bytes)")
+
+    return True
+
+
+# ── Public Python-native sniff helper ─────────────────────────────────────────
+
+def _python_lorawan_sniff(dongle, duration: int = 60) -> list[dict]:
+    """Sniff LoRaWAN traffic using whad.lorawan.LWGateway Python API.
+
+    Emulates a LoRaWAN gateway to capture JOIN requests and uplink frames.
+    Returns list of dicts with keys: type, dev_eui, payload_hex, rssi.
+    Falls back silently if the module is not importable or hardware is unsupported.
+
+    Args:
+        dongle: WhadDongle with phy_dongle attribute.
+        duration: Seconds to listen.
+
+    Returns:
+        List of captured LoRaWAN frame dicts.
+    """
+    try:
+        from whad.lorawan import LWGateway
+    except ImportError:
+        log.debug("[S15] whad.lorawan.LWGateway not importable — skipping Python LoRaWAN sniff")
+        return []
+
+    device = getattr(dongle, "phy_dongle", None)
+    if device is None:
+        log.debug("[S15] No PHY dongle available for LoRaWAN — skipping Python sniff")
+        return []
+
+    results: list[dict] = []
+    gw = None
+
+    class _SniffApp:
+        def on_join_request(self, dev_eui, dev_nonce, **kwargs) -> None:
+            log.info(f"[S15][gw] JOIN REQUEST from DevEUI={dev_eui}")
+            results.append({
+                "type": "join_request",
+                "dev_eui": str(dev_eui),
+                "payload_hex": "",
+                "rssi": None,
+            })
+
+        def on_uplink(self, dev_addr, payload, rssi=None, **kwargs) -> None:
+            hex_payload = bytes(payload).hex() if isinstance(payload, (bytes, bytearray)) else str(payload)
+            log.info(f"[S15][gw] UPLINK from {dev_addr}: {hex_payload[:32]}")
+            results.append({
+                "type": "uplink",
+                "dev_eui": str(dev_addr),
+                "payload_hex": hex_payload,
+                "rssi": rssi,
+            })
+
+    try:
+        channel_plan = _build_channel_plan(config.LORAWAN_REGION)
+        app = _SniffApp()
+        try:
+            gw = LWGateway(device.device, channel_plan, app)
+        except TypeError:
+            gw = LWGateway(device.device, app)
+
+        log.info(f"[S15][gw] Python LWGateway listening for {duration}s")
+        gw.start()
+        deadline = time.time() + duration
+        while time.time() < deadline:
+            time.sleep(1.0)
+
+    except (AttributeError, NotImplementedError, TypeError) as exc:
+        log.debug(f"[S15][gw] LWGateway not supported on this hardware: {exc}")
+    except Exception as exc:
+        log.debug(f"[S15][gw] LWGateway error: {exc}")
+    finally:
+        if gw is not None:
+            try:
+                gw.stop()
+            except Exception:
+                pass
+
+    return results
+
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
@@ -77,6 +304,16 @@ def run(dongle: WhadDongle, engagement_id: str) -> None:
 
     join_requests: list[dict] = []
     data_frames:   list[dict] = []
+
+    # Python-native LWGateway path — runs first, results are logged then preserved
+    gw_results = _python_lorawan_sniff(dongle, duration=config.LORAWAN_SNIFF_SECS)
+    if gw_results:
+        joins_found = [r for r in gw_results if r["type"] == "join_request"]
+        uplinks_found = [r for r in gw_results if r["type"] == "uplink"]
+        log.info(
+            f"[S15] Python LWGateway captured {len(joins_found)} join(s) "
+            f"and {len(uplinks_found)} uplink(s)"
+        )
 
     try:
         gw = _LoraGateway(dongle.device)

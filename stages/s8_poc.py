@@ -24,8 +24,16 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from whad.ble.exceptions import (
-    ConnectionLostException,
+from whad.ble.exceptions import ConnectionLostException, NotConnected
+from whad.ble.stack.att.exceptions import (
+    AttError,
+    WriteNotPermittedError,
+    ReadNotPermittedError,
+    AttributeNotFoundError,
+    InsufficientAuthenticationError,
+    InsufficientAuthorizationError,
+    InsufficientEncryptionError,
+    InvalidAttrValueLength,
 )
 
 from core.dongle import WhadDongle
@@ -107,6 +115,21 @@ def run(
 
         log.info(f"[S8] Connected to {addr}.")
 
+        try:
+            if not central.is_connected():
+                log.warning(f"[S8] central.is_connected() reports not connected after connect() on {addr}.")
+                return
+        except Exception as _e:
+            log.debug(f"[S8] is_connected() unavailable: {_e}")
+
+        try:
+            _ble_ver = central.version(synchronous=True)
+            if _ble_ver:
+                log.info(f"[S8] BLE version: {_ble_ver}")
+                target["ble_version"] = str(_ble_ver)
+        except Exception as _e:
+            log.debug(f"[S8] version() unavailable: {_e}")
+
         # Negotiate MTU — enables >20-byte payloads on ATT reads/writes.
         try:
             central.set_mtu(247)
@@ -118,6 +141,15 @@ def run(
         discovered = _discover_with_timeout(periph_dev, addr)
         if not discovered:
             log.warning(f"[S8] Discovery failed — notify subscriptions unavailable.")
+
+        if discovered:
+            try:
+                _profile_json = central.export_profile()
+                if _profile_json:
+                    log.debug(f"[S8] Profile JSON: {len(_profile_json)} chars")
+                    target["gatt_profile_json"] = _profile_json
+            except Exception as _e:
+                log.debug(f"[S8] export_profile() unavailable: {_e}")
 
         # Self-profile when Stage 5 didn't run or found no characteristics.
         # Stage 7 may have found writable handles without a full profile.
@@ -160,6 +192,12 @@ def run(
 
         # Phase 1 — Baseline reads (by handle; no discovery required)
         for char in readable[:8]:
+            try:
+                if not central.is_connected():
+                    log.debug("[S8] central.is_connected() returned False — aborting probe")
+                    break
+            except Exception:
+                pass
             h = char["value_handle"]
             try:
                 raw = periph_dev.read(h)
@@ -168,11 +206,26 @@ def run(
                     log.debug(
                         f"[S8] Baseline h={h} ({char['uuid'][:8]}...): {bytes(raw).hex()}"
                     )
+            except ReadNotPermittedError:
+                log.debug(f"[S8] Baseline read h={h}: read not permitted")
+            except AttributeNotFoundError:
+                log.debug(f"[S8] Baseline read h={h}: attribute not found")
+            except NotConnected:
+                log.debug(f"[S8] Baseline read h={h}: disconnected")
+                break
+            except AttError as exc:
+                log.debug(f"[S8] Baseline read h={h}: ATT error — {_exc_summary(exc)}")
             except Exception as exc:
                 log.debug(f"[S8] Baseline read h={h}: {_exc_summary(exc)}")
 
         # Phase 2 — Semantic writes
         for action in actions:
+            try:
+                if not central.is_connected():
+                    log.debug("[S8] central.is_connected() returned False — aborting probe")
+                    break
+            except Exception:
+                pass
             label  = action["label"]
             handle = action["handle"]
             uuid   = action["uuid"]
@@ -324,6 +377,32 @@ def _do_rename(
         periph_dev.write(handle, poc_bytes)
         wr.success = True
         log.info(f"[S8] 0x2A00 h={handle}: WRITE OK — '{poc_name}' ({poc_bytes.hex()})")
+    except WriteNotPermittedError:
+        wr.error = "write_not_permitted"
+        log.info(f"[S8] 0x2A00 h={handle}: WRITE REJECTED — characteristic hardened")
+    except (InsufficientAuthenticationError, InsufficientAuthorizationError):
+        wr.error = "auth_required"
+        log.info(
+            f"[S8] 0x2A00 h={handle}: WRITE REJECTED — "
+            "authentication required (pairing opportunity)"
+        )
+    except InsufficientEncryptionError:
+        wr.error = "encryption_required"
+        log.info(f"[S8] 0x2A00 h={handle}: WRITE REJECTED — encryption required")
+    except InvalidAttrValueLength as exc:
+        wr.error = _exc_summary(exc)
+        log.info(f"[S8] 0x2A00 h={handle}: WRITE FAILED — invalid attribute value length")
+    except AttributeNotFoundError:
+        wr.error = "attr_not_found"
+        log.info(f"[S8] 0x2A00 h={handle}: WRITE FAILED — attribute not found")
+    except NotConnected:
+        wr.error = "disconnected"
+        log.warning(f"[S8] 0x2A00 h={handle}: disconnected during rename write")
+        results.append(wr)
+        return results
+    except AttError as exc:
+        wr.error = _exc_summary(exc)
+        log.info(f"[S8] 0x2A00 h={handle}: ATT error — {wr.error}")
     except Exception as exc:
         _s = str(exc).lower()
         if "not permitted" in _s:
@@ -359,6 +438,14 @@ def _do_rename(
                         f"[S8] 0x2A00 h={handle}: read-back mismatch "
                         f"→ {bytes(rb).hex()}"
                     )
+        except ReadNotPermittedError:
+            log.debug(f"[S8] 0x2A00 h={handle}: read-back not permitted")
+        except AttributeNotFoundError:
+            log.debug(f"[S8] 0x2A00 h={handle}: read-back attribute not found")
+        except NotConnected:
+            log.debug(f"[S8] 0x2A00 h={handle}: disconnected during read-back")
+        except AttError as exc:
+            log.debug(f"[S8] 0x2A00 h={handle}: read-back ATT error — {_exc_summary(exc)}")
         except Exception as exc:
             log.debug(f"[S8] 0x2A00 h={handle}: read-back failed — {_exc_summary(exc)}")
 
@@ -381,6 +468,29 @@ def _do_alert(periph_dev, handle: int, uuid: str) -> list[WriteResult]:
         periph_dev.write(handle, bytes([0x02]))
         r_high.success = True
         log.info(f"[S8] 0x2A06 h={handle}: WRITE OK — High Alert (0x02)")
+    except WriteNotPermittedError:
+        r_high.error = "write_not_permitted"
+        log.info(f"[S8] 0x2A06 h={handle}: WRITE REJECTED — characteristic hardened")
+    except (InsufficientAuthenticationError, InsufficientAuthorizationError):
+        r_high.error = "auth_required"
+        log.info(f"[S8] 0x2A06 h={handle}: WRITE REJECTED — authentication required")
+    except InsufficientEncryptionError:
+        r_high.error = "encryption_required"
+        log.info(f"[S8] 0x2A06 h={handle}: WRITE REJECTED — encryption required")
+    except InvalidAttrValueLength as exc:
+        r_high.error = _exc_summary(exc)
+        log.info(f"[S8] 0x2A06 h={handle}: WRITE FAILED — invalid attribute value length")
+    except AttributeNotFoundError:
+        r_high.error = "attr_not_found"
+        log.info(f"[S8] 0x2A06 h={handle}: WRITE FAILED — attribute not found")
+    except NotConnected:
+        r_high.error = "disconnected"
+        log.warning(f"[S8] 0x2A06 h={handle}: disconnected during alert write")
+        results.append(r_high)
+        return results
+    except AttError as exc:
+        r_high.error = _exc_summary(exc)
+        log.info(f"[S8] 0x2A06 h={handle}: ATT error — {r_high.error}")
     except Exception as exc:
         _s = str(exc).lower()
         if "not permitted" in _s:
@@ -419,6 +529,28 @@ def _do_hr_reset(periph_dev, handle: int, uuid: str) -> list[WriteResult]:
         periph_dev.write(handle, bytes([0x01]))
         r.success = True
         log.info(f"[S8] 0x2A39 h={handle}: WRITE OK — Reset Energy Expended (0x01)")
+    except WriteNotPermittedError:
+        r.error = "write_not_permitted"
+        log.info(f"[S8] 0x2A39 h={handle}: WRITE REJECTED — characteristic hardened")
+    except (InsufficientAuthenticationError, InsufficientAuthorizationError):
+        r.error = "auth_required"
+        log.info(f"[S8] 0x2A39 h={handle}: WRITE REJECTED — authentication required")
+    except InsufficientEncryptionError:
+        r.error = "encryption_required"
+        log.info(f"[S8] 0x2A39 h={handle}: WRITE REJECTED — encryption required")
+    except InvalidAttrValueLength as exc:
+        r.error = _exc_summary(exc)
+        log.info(f"[S8] 0x2A39 h={handle}: WRITE FAILED — invalid attribute value length")
+    except AttributeNotFoundError:
+        r.error = "attr_not_found"
+        log.info(f"[S8] 0x2A39 h={handle}: WRITE FAILED — attribute not found")
+    except NotConnected:
+        r.error = "disconnected"
+        log.warning(f"[S8] 0x2A39 h={handle}: disconnected during HR reset write")
+        return [r]
+    except AttError as exc:
+        r.error = _exc_summary(exc)
+        log.info(f"[S8] 0x2A39 h={handle}: ATT error — {r.error}")
     except Exception as exc:
         _s = str(exc).lower()
         if "not permitted" in _s:
@@ -476,10 +608,35 @@ def _do_probe(
                 log.debug(f"[S8] Notify subscribe failed: {_exc_summary(exc)}")
 
     for probe_bytes in _PROPRIETARY_PROBES:
+        try:
+            if not periph_dev.is_connected() if hasattr(periph_dev, "is_connected") else False:
+                log.debug("[S8] central.is_connected() returned False — aborting probe")
+                break
+        except Exception:
+            pass
         r = WriteResult(handle=handle, uuid=uuid, label="probe", data=probe_bytes)
         try:
             periph_dev.write_command(handle, probe_bytes)
             r.success = True
+        except WriteNotPermittedError:
+            r.error = "write_not_permitted"
+        except (InsufficientAuthenticationError, InsufficientAuthorizationError):
+            r.error = "auth_required"
+        except InsufficientEncryptionError:
+            r.error = "encryption_required"
+        except InvalidAttrValueLength as exc:
+            r.error = _exc_summary(exc)
+        except AttributeNotFoundError:
+            r.error = "attr_not_found"
+            log.debug(f"[S8] Probe h={handle}: attribute not found")
+        except NotConnected:
+            r.error = "disconnected"
+            log.debug(f"[S8] Probe h={handle}: disconnected")
+            results.append(r)
+            break
+        except AttError as exc:
+            r.error = _exc_summary(exc)
+            log.debug(f"[S8] Probe h={handle}: ATT error — {r.error}")
         except Exception as exc:
             _s = str(exc).lower()
             if "not permitted" in _s:

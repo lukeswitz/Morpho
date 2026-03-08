@@ -17,7 +17,15 @@ from datetime import datetime, timezone
 from whad.ble.exceptions import (
     ConnectionLostException,
     PeripheralNotFound,
+    HookReturnAccessDenied,
+    HookReturnAuthentRequired,
+    HookReturnAuthorRequired,
+    HookReturnNotFound,
+    HookReturnGattError,
+    InvalidHandleValueException,
+    NotConnected,
 )
+
 from whad.device import WhadDevice
 
 from core.dongle import WhadDongle
@@ -370,9 +378,15 @@ def _run_python_api(dongle: WhadDongle, target: Target, engagement_id: str) -> t
         detach_monitor(_monitor)
         return [], []
 
+    try:
+        ver = central.version(synchronous=True)
+        if ver is not None:
+            log.info(f"[S5] Remote BLE version: {ver}")
+    except Exception as exc:
+        log.debug(f"[S5] central.version() failed: {exc}")
+
     log.info(f"Connected to {addr}. Discovering GATT profile...")
 
-    # Negotiate MTU — enables >20-byte characteristic payloads.
     _negotiated_mtu: int | None = None
     try:
         central.set_mtu(247)
@@ -389,6 +403,12 @@ def _run_python_api(dongle: WhadDongle, target: Target, engagement_id: str) -> t
         except Exception:
             pass
         return [], []
+
+    try:
+        profile_json = central.export_profile()
+        log.debug(f"[S5] GATT profile exported ({len(profile_json)} chars)")
+    except Exception as exc:
+        log.debug(f"[S5] export_profile() not available: {exc}")
 
     log.info("Enumerating characteristics...")
 
@@ -428,6 +448,28 @@ def _run_python_api(dongle: WhadDongle, target: Target, engagement_id: str) -> t
                     except PeripheralNotFound:
                         log.warning(f"[S5] Device lost during enumeration: {addr}")
                         break
+                    except NotConnected:
+                        log.warning(f"[S5] Not connected during read: h=0x{value_handle:04X} — disconnecting")
+                        break
+                    except HookReturnAccessDenied:
+                        log.debug(f"[S5] Access denied: h=0x{value_handle:04X} {char_uuid}")
+                    except HookReturnNotFound:
+                        log.debug(f"[S5] Attribute not found: h=0x{value_handle:04X} {char_uuid}")
+                    except HookReturnAuthentRequired:
+                        gc.requires_auth = True
+                        log.info(
+                            f"[S5] Auth required for read: h=0x{value_handle:04X} {char_uuid}"
+                        )
+                    except HookReturnAuthorRequired:
+                        gc.requires_auth = True
+                        log.info(
+                            f"[S5] Authorization required for read: h=0x{value_handle:04X} {char_uuid}"
+                        )
+                    except HookReturnGattError as exc:
+                        log.debug(
+                            f"  {char_uuid} h={value_handle} "
+                            f"READ GattError: {exc}"
+                        )
                     except Exception as exc:
                         _s = str(exc).lower()
                         if "authentication" in _s or "authorization" in _s or "encryption" in _s:
@@ -455,6 +497,30 @@ def _run_python_api(dongle: WhadDongle, target: Target, engagement_id: str) -> t
                     except PeripheralNotFound:
                         log.warning(f"[S5] Device lost during write scan: {addr}")
                         break
+                    except NotConnected:
+                        log.warning(f"[S5] Not connected during write: h=0x{value_handle:04X} — disconnecting")
+                        break
+                    except HookReturnAccessDenied:
+                        log.debug(f"[S5] Write access denied: h=0x{value_handle:04X} {char_uuid}")
+                    except HookReturnNotFound:
+                        log.debug(f"[S5] Attribute not found (write): h=0x{value_handle:04X} {char_uuid}")
+                    except InvalidHandleValueException:
+                        log.debug(f"[S5] Invalid handle value (write): h=0x{value_handle:04X} {char_uuid}")
+                    except HookReturnAuthentRequired:
+                        gc.requires_enc = True
+                        log.info(
+                            f"[S5] Auth required for write: h=0x{value_handle:04X} {char_uuid}"
+                        )
+                    except HookReturnAuthorRequired:
+                        gc.requires_enc = True
+                        log.info(
+                            f"[S5] Authorization required for write: h=0x{value_handle:04X} {char_uuid}"
+                        )
+                    except HookReturnGattError as exc:
+                        log.debug(
+                            f"  {char_uuid} h={value_handle} "
+                            f"WRITE GattError: {exc}"
+                        )
                     except Exception as exc:
                         _s = str(exc).lower()
                         if "authentication" in _s or "authorization" in _s or "encryption" in _s:
@@ -468,6 +534,10 @@ def _run_python_api(dongle: WhadDongle, target: Target, engagement_id: str) -> t
                                 f"WRITE {type(exc).__name__}: {exc}"
                             )
 
+                if periph_dev and not central.is_connected():
+                    log.debug("[S5] central.is_connected() returned False — treating as disconnected")
+                    break
+
                 chars.append(gc)
 
     except ConnectionLostException:
@@ -477,14 +547,12 @@ def _run_python_api(dongle: WhadDongle, target: Target, engagement_id: str) -> t
             f"GATT enumeration error on {addr}: {type(exc).__name__}: {exc}"
         )
 
-    # --- Inline auth escalation (LESC Just Works on same connection) ---
     auth_blocked = [c for c in chars if c.requires_auth or c.requires_enc]
     if auth_blocked and periph_dev is not None:
         _try_inline_auth_escalation(
             periph_dev, auth_blocked, addr, engagement_id, target,
         )
 
-    # --- Notification harvest (within the same open connection) ---
     notifications: list[dict] = []
     notify_chars = [
         c for c in chars
@@ -493,7 +561,6 @@ def _run_python_api(dongle: WhadDongle, target: Target, engagement_id: str) -> t
     if notify_chars and periph_dev is not None:
         notifications = _harvest_notifications(periph_dev, notify_chars, addr)
 
-    # --- Standard service rich queries (BatteryService, DIS, HeartRateService) ---
     if periph_dev is not None:
         _query_standard_services(periph_dev, device_info, addr)
 
@@ -511,7 +578,6 @@ def _run_python_api(dongle: WhadDongle, target: Target, engagement_id: str) -> t
 
     profile = [_char_to_dict(c) for c in chars]
 
-    # Save profile to JSON for offline analysis and sharing.
     import json as _json
     _profile_path = (
         config.REPORT_DIR
@@ -1078,6 +1144,14 @@ def shell(
     if periph_dev is None:
         print(f"  [shell] Could not connect to {addr} (timeout).")
         return
+
+    try:
+        ver = central.version(synchronous=True)
+        if ver is not None:
+            log.info(f"[S5] Remote BLE version: {ver}")
+    except Exception as exc:
+        log.debug(f"[S5] central.version() failed: {exc}")
+
     print(f"  Connected. Type 'help' for commands.\n")
 
     subscribed: dict[int, object] = {}
@@ -1113,6 +1187,10 @@ def shell(
             break
         if not raw:
             continue
+
+        if periph_dev and not central.is_connected():
+            log.debug("[S5] central.is_connected() returned False — treating as disconnected")
+            break
 
         parts = raw.split()
         cmd = parts[0].lower()
@@ -1470,3 +1548,20 @@ def _print_summary(
             "                      confirms real-time BLE data leakage."
         )
     print("─" * 76 + "\n")
+
+
+def _wait_peripheral_connection(peripheral, timeout: int = 30) -> bool:
+    """Wait for an inbound BLE connection on a Peripheral connector.
+
+    Returns True if a device connected within timeout, False otherwise.
+    Uses peripheral.wait_connection(timeout) if available.
+    """
+    try:
+        result = peripheral.wait_connection(timeout=timeout)
+        return result is not None
+    except AttributeError:
+        log.debug("[S5] peripheral.wait_connection() not available")
+        return False
+    except Exception as exc:
+        log.debug(f"[S5] peripheral.wait_connection() failed: {exc}")
+        return False

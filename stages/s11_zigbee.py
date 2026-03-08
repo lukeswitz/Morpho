@@ -44,6 +44,43 @@ ZIGBEE_COORD_SECS  = config.ZIGBEE_COORD_SECS    # coordinator join window
 
 
 # ---------------------------------------------------------------------------
+# Energy Detection channel survey (Gap 1)
+# ---------------------------------------------------------------------------
+
+def _ed_channel_survey(dongle: WhadDongle) -> dict[int, Any]:
+    """Run an energy detection scan on channels 11–26 using a ZigBee Coordinator.
+
+    Returns a dict mapping channel number to ED value, or an empty dict if the
+    hardware does not support perform_ed_scan().
+    """
+    ed_levels: dict[int, Any] = {}
+    try:
+        from whad.zigbee.connector.coordinator import Coordinator
+        coord = Coordinator(dongle.device)
+        coord.start()
+        for ch in range(11, 27):
+            try:
+                ed = coord.perform_ed_scan(channel=ch)
+                if ed is not None:
+                    ed_levels[ch] = ed
+                    log.debug(f"[S11][coord] ED scan ch{ch}: {ed}")
+            except (AttributeError, NotImplementedError):
+                log.debug("[S11][coord] perform_ed_scan() not supported on this hardware")
+                break
+            except Exception as exc:
+                log.debug(f"[S11][coord] perform_ed_scan() error: {exc}")
+        try:
+            coord.stop()
+        except Exception:
+            pass
+    except ImportError:
+        log.debug("[S11] whad.zigbee.connector.coordinator not available — ED survey skipped")
+    except Exception as exc:
+        log.debug(f"[S11] ED survey failed: {type(exc).__name__}: {exc}")
+    return ed_levels
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -67,13 +104,25 @@ def run(dongle: WhadDongle, engagement_id: str, mode: str = "passive") -> None:
         f"~{len(CHANNELS) * ZIGBEE_PER_CH_SECS}s total) ..."
     )
 
+    # Gap 1: ED scan survey — rank channels by energy before the sniffer pass.
+    ed_levels = _ed_channel_survey(dongle)
+    if ed_levels:
+        hot = sorted(ed_levels, key=lambda c: ed_levels[c], reverse=True)
+        log.info(
+            "[S11] ED survey complete. Hot channels (descending energy): "
+            + ", ".join(f"ch{c}={ed_levels[c]}" for c in hot[:6])
+        )
+        scan_order = hot + [c for c in CHANNELS if c not in hot]
+    else:
+        scan_order = list(CHANNELS)
+
     # {pan_id: {"channel": int, "devices": set[str], "pkt_count": int}}
     networks: dict[int, dict] = {}
     all_keys: list[bytes] = []
     decrypted_count = 0
     decrypted_sample: list[str] = []
 
-    for ch in CHANNELS:
+    for ch in scan_order:
         log.info(f"[S11] Channel {ch} ...")
         try:
             sniffer = Sniffer(dongle.device)
@@ -264,6 +313,17 @@ def run(dongle: WhadDongle, engagement_id: str, mode: str = "passive") -> None:
 # ZigBee Coordinator (rogue PAN)
 # ---------------------------------------------------------------------------
 
+def _coord_send_test_frame(coordinator) -> None:
+    """Send a ZigBee beacon request from coordinator to enumerate nearby devices."""
+    try:
+        from scapy.contrib.zigbee import ZigBeeBeaconPayload, Dot15d4, Dot15d4FCS  # noqa: F401
+        pkt = Dot15d4() / ZigBeeBeaconPayload()
+        coordinator.send(pkt)
+        log.debug("[S11][coord] test beacon injected via coordinator.send()")
+    except (AttributeError, ImportError, Exception) as exc:
+        log.debug(f"[S11][coord] coordinator.send() skipped: {exc}")
+
+
 def _best_channel(networks: dict) -> int:
     """Return the channel with the most traffic, default 15 if nothing seen."""
     if not networks:
@@ -325,6 +385,17 @@ def _run_coordinator(
 
         coord.start()
 
+        # Gap 2: attempt proper network formation if the API supports it.
+        try:
+            if hasattr(coord, "start_network"):
+                coord.start_network(channel=channel)
+                log.info(f"[S11][coord] start_network() called on ch{channel}")
+            elif hasattr(coord, "network_formation"):
+                coord.network_formation()
+                log.info("[S11][coord] network_formation() called")
+        except Exception as exc:
+            log.debug(f"[S11][coord] network init method failed: {exc}")
+
         # Open join permit — duration varies by WHAD version.
         try:
             coord.open_join_window(duration=ZIGBEE_COORD_SECS)
@@ -334,6 +405,9 @@ def _run_coordinator(
                 "[S11][coord] open_join_window() not available — "
                 "listening passively for joins."
             )
+
+        # Gap 3: inject a beacon request to solicit responses from nearby devices.
+        _coord_send_test_frame(coord)
 
         deadline = time.time() + ZIGBEE_COORD_SECS
         import threading as _threading
@@ -433,6 +507,17 @@ def _run_coordinator(
 # ZigBee EndDevice (join a real PAN, capture group traffic)
 # ---------------------------------------------------------------------------
 
+def _enddev_send_test_frame(end_device) -> None:
+    """Send a ZigBee data frame from the joined end device."""
+    try:
+        from scapy.contrib.zigbee import ZigBee
+        pkt = ZigBee(frametype=0b00)  # data frame
+        end_device.send(pkt)
+        log.debug("[S11][end] test data frame sent via end_device.send()")
+    except (AttributeError, ImportError, Exception) as exc:
+        log.debug(f"[S11][end] end_device.send() skipped: {exc}")
+
+
 def _run_enddevice(
     dongle: WhadDongle,
     engagement_id: str,
@@ -472,6 +557,18 @@ def _run_enddevice(
         enddevice.channel = channel
         enddevice.start()
 
+        # Gap 4: try the high-level discover_networks() API before manual channel scan.
+        try:
+            networks = enddevice.discover_networks()
+            if networks:
+                log.info(
+                    f"[S11][end] discover_networks() found {len(list(networks))} network(s)"
+                )
+        except (AttributeError, NotImplementedError, TypeError):
+            log.debug("[S11][end] discover_networks() not available — using manual scan")
+        except Exception as exc:
+            log.debug(f"[S11][end] discover_networks() error: {exc}")
+
         # Attempt association — API varies; try join(pan_id) then associate()
         for method_name in ("join", "associate", "connect"):
             fn = getattr(enddevice, method_name, None)
@@ -505,6 +602,9 @@ def _run_enddevice(
 
         log.info(f"[S11] *** Joined ZigBee PAN 0x{pan_id:04X} as EndDevice! ***")
         print(f"  [S11] Association accepted! Listening for group traffic ...")
+
+        # Gap 5: inject a test application data frame to probe injection capability.
+        _enddev_send_test_frame(enddevice)
 
         deadline = time.time() + join_timeout
         for pkt in _enddevice_stream(enddevice, deadline):

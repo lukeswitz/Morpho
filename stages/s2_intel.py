@@ -27,6 +27,59 @@ import config
 log = get_logger("s2_intel")
 
 
+def _sync_sniffer_on_target(sniffer, target_addr: str) -> bool:
+    """Attempt to synchronize sniffer on a specific target address.
+
+    Calls sniffer.wait_new_connection(address) if available. Returns True on
+    success. Falls back silently on AttributeError or any runtime error so the
+    caller's manual CONNECT_IND loop can take over.
+
+    Args:
+        sniffer: WHAD BLE Sniffer connector instance.
+        target_addr: BD address string (upper-case, colon-separated).
+
+    Returns:
+        True if wait_new_connection() succeeded, False otherwise.
+    """
+    try:
+        sniffer.wait_new_connection(target_addr)
+        log.debug(f"[S2] sniffer.wait_new_connection({target_addr!r}) succeeded")
+        return True
+    except AttributeError:
+        log.debug("[S2] sniffer.wait_new_connection() not available — using manual loop")
+        return False
+    except Exception as exc:
+        log.debug(f"[S2] sniffer.wait_new_connection() failed: {exc} — falling back to manual loop")
+        return False
+
+
+def _apply_sniffer_decrypt_keys(sniffer, keys: dict[str, str]) -> None:
+    """Feed extracted BLE keys back into the sniffer for live decryption.
+
+    Calls sniffer.add_key(key_bytes) for each LTK/STK-class key found in
+    *keys*. Keys are stored as hex strings; each is converted to bytes before
+    being passed to the sniffer. Errors per-key are logged at DEBUG so a bad
+    key value never aborts the rest.
+
+    Args:
+        sniffer: WHAD BLE Sniffer connector instance.
+        keys: Dict mapping field names to hex-string values (output of
+              _parse_wanalyze_output or _extract_all_keys internal dict).
+    """
+    _key_fields = ("stk", "ltk", "irk", "csrk")
+    for field, hex_val in keys.items():
+        if field not in _key_fields:
+            continue
+        try:
+            key_bytes = bytes.fromhex(hex_val)
+            sniffer.add_key(key_bytes)
+            log.debug(f"[S2] sniffer.add_key({field}={hex_val[:8]}…) OK")
+        except (ValueError, AttributeError) as exc:
+            log.debug(f"[S2] sniffer.add_key({field}) skipped: {exc}")
+        except Exception as exc:
+            log.debug(f"[S2] sniffer.add_key({field}) error: {exc}")
+
+
 def run(
     dongle: WhadDongle,
     targets: list[Target],
@@ -43,12 +96,42 @@ def run(
 
     sniffer = dongle.sniffer()
     sniffer.configure(advertisements=True)
+
+    # Enable live decryption on the sniffer before start so it auto-decrypts
+    # any key material it captures during the session.
+    try:
+        sniffer.decrypt = True
+        log.debug("[S2] sniffer.decrypt = True")
+    except AttributeError:
+        log.debug("[S2] sniffer.decrypt property not available on this firmware")
+    except Exception as exc:
+        log.debug(f"[S2] sniffer.decrypt assignment failed: {exc}")
+
+    # Apply BD address filter so the sniffer focuses on known targets.
+    if target_addrs:
+        try:
+            sniffer.filter = list(target_addrs)
+            log.debug(f"[S2] sniffer.filter = {list(target_addrs)}")
+        except AttributeError:
+            log.debug("[S2] sniffer.filter property not available on this firmware")
+        except Exception as exc:
+            log.debug(f"[S2] sniffer.filter assignment failed: {exc}")
+
     _monitor = None
     _s2_pcap: Path | None = None
     if targets:
         _s2_pcap = pcap_path(engagement_id, 2, targets[0].bd_address)
         _monitor = attach_monitor(sniffer, _s2_pcap)
     sniffer.start()
+
+    # Log available firmware actions for diagnostics.
+    try:
+        actions = sniffer.available_actions(action_filter=None)
+        log.debug(f"[S2] sniffer.available_actions(): {actions}")
+    except AttributeError:
+        log.debug("[S2] sniffer.available_actions() not supported on this firmware")
+    except Exception as exc:
+        log.debug(f"[S2] sniffer.available_actions() error: {exc}")
 
     start_ts = time()
 

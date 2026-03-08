@@ -31,6 +31,12 @@ import config
 
 log = get_logger("s12_phy")
 
+try:
+    from whad.phy.connector.lora import LoRa as _LoRaConnector
+    _LORA_CONNECTOR_AVAILABLE = True
+except ImportError:
+    _LORA_CONNECTOR_AVAILABLE = False
+
 # 2.4 GHz ISM band: 2402–2480 MHz in 2 MHz steps
 _2G4_FREQS_MHZ = list(range(2402, 2481, 2))
 
@@ -201,8 +207,233 @@ def run(dongle: WhadDongle, engagement_id: str) -> None:
             dongle, PhySniffer, SnifferConfiguration, band_activity, engagement_id
         )
 
+    # Attempt LoRa-specific scan if hardware supports it
+    lora_results = _lora_scan(dongle, frequencies_mhz=[433.175, 868.1, 915.0], duration_secs=5)
+    if lora_results:
+        log.info(f"[S12] LoRa scan: {len(lora_results)} frame(s) captured")
+
     _print_summary(band_activity, total_packets)
 
+
+
+# ---------------------------------------------------------------------------
+# LoRa native connector scan
+# ---------------------------------------------------------------------------
+
+# LoRa scan frequencies: common ISM LoRa channels (EU 868 MHz region)
+_LORA_FREQS_MHZ = [868, 868_1, 868_3, 868_5, 869_525]  # MHz, EU defaults
+# Convert to plain integer MHz values (the above literals are invalid — use list)
+_LORA_FREQS_MHZ = [868, 8681, 8683, 8685, 869525]  # placeholder; real values below
+_LORA_FREQS_MHZ = [
+    868_000_000,   # 868.0 MHz
+    868_100_000,   # 868.1 MHz
+    868_300_000,   # 868.3 MHz
+    868_500_000,   # 868.5 MHz
+    869_525_000,   # 869.525 MHz (duty-cycle-free)
+]
+
+_LORA_SF       = 7        # Spreading factor (7–12; 7 = fastest, shortest range)
+_LORA_BW       = 125_000  # Bandwidth Hz (125, 250, 500 kHz)
+_LORA_CR       = 5        # Coding rate denominator (5 = 4/5)
+_LORA_PREAMBLE = 8        # Preamble symbols
+
+
+def _run_lora_scan_native(dongle: WhadDongle, engagement_id: str) -> None:
+    """Scan LoRa channels using the whad.phy.connector.lora.LoRa connector.
+
+    Tries each frequency in _LORA_FREQS_MHZ with SF7/BW125/CR4-5 config.
+    Logs captured packets and creates Findings for any LoRa traffic found.
+
+    Args:
+        dongle: Active WHAD dongle.
+        engagement_id: Engagement ID for Finding storage.
+    """
+    log.info(
+        f"[S12] LoRa native scan: {len(_LORA_FREQS_MHZ)} channel(s), "
+        f"SF={_LORA_SF} BW={_LORA_BW // 1000}kHz CR=4/{_LORA_CR} "
+        f"({PHY_PER_FREQ_SECS}s dwell each) ..."
+    )
+
+    lora_findings: list[dict[str, Any]] = []
+
+    for freq_hz in _LORA_FREQS_MHZ:
+        freq_mhz = freq_hz / 1_000_000
+        log.debug(f"[S12] LoRa {freq_mhz:.3f} MHz ...")
+
+        try:
+            lora = _LoRaConnector(dongle.device)
+            lora.sf = _LORA_SF
+            lora.bw = _LORA_BW
+            lora.cr = _LORA_CR
+            lora.preamble_length = _LORA_PREAMBLE
+            lora.enable_crc(True)
+            lora.enable_explicit_mode(True)
+            lora.start()
+
+            deadline = time.time() + PHY_PER_FREQ_SECS
+            pkts_here = 0
+
+            for pkt in lora.sniff(timeout=PHY_PER_FREQ_SECS):
+                pkts_here += 1
+                payload = bytes(pkt)
+                rssi = getattr(pkt, "rssi", None)
+                rssi_str = f"{int(rssi)} dBm" if rssi is not None else "unknown"
+                log.info(
+                    f"[S12] LoRa pkt @ {freq_mhz:.3f} MHz  "
+                    f"RSSI={rssi_str}  payload={payload.hex()}"
+                )
+                lora_findings.append(
+                    {
+                        "freq_hz": freq_hz,
+                        "freq_mhz": freq_mhz,
+                        "payload_hex": payload.hex(),
+                        "rssi_dbm": int(rssi) if rssi is not None else None,
+                    }
+                )
+                if time.time() >= deadline:
+                    break
+
+            if pkts_here > 0:
+                log.info(
+                    f"[S12] LoRa {freq_mhz:.3f} MHz: {pkts_here} pkt(s) captured."
+                )
+
+            try:
+                lora.stop()
+            except Exception:
+                pass
+
+        except Exception as exc:
+            log.debug(
+                f"[S12] LoRa {freq_mhz:.3f} MHz error: {type(exc).__name__}: {exc}"
+            )
+
+    if not lora_findings:
+        log.info("[S12] No LoRa traffic captured.")
+        return
+
+    log.info(f"[S12] LoRa scan complete: {len(lora_findings)} pkt(s) total.")
+
+    # Group by frequency for one Finding per active channel
+    freqs_seen: dict[float, list[dict]] = {}
+    for entry in lora_findings:
+        freqs_seen.setdefault(entry["freq_mhz"], []).append(entry)
+
+    for freq_mhz, pkts in freqs_seen.items():
+        payloads = [p["payload_hex"] for p in pkts]
+        rssi_vals = [p["rssi_dbm"] for p in pkts if p["rssi_dbm"] is not None]
+        peak_rssi = max(rssi_vals) if rssi_vals else None
+        rssi_str = f"{peak_rssi} dBm" if peak_rssi is not None else "unknown"
+
+        finding = Finding(
+            type="lora_traffic_detected",
+            severity="medium",
+            target_addr=f"{freq_mhz:.3f} MHz",
+            description=(
+                f"LoRa traffic detected at {freq_mhz:.3f} MHz "
+                f"(SF={_LORA_SF}, BW={_LORA_BW // 1000} kHz, CR=4/{_LORA_CR}). "
+                f"{len(pkts)} packet(s) captured. Peak RSSI: {rssi_str}. "
+                "LoRa devices may transmit sensor data, GPS coordinates, or "
+                "command-and-control messages in plaintext or with weak encryption."
+            ),
+            remediation=(
+                "Capture and decode LoRa payloads to assess data sensitivity. "
+                "Verify that application-layer encryption (e.g. AES-128) is enabled "
+                "and that join/session keys are unique per device. "
+                "Investigate whether the device belongs to a known LoRaWAN network "
+                "or is operating on a private frequency plan."
+            ),
+            evidence={
+                "frequency_mhz": freq_mhz,
+                "spreading_factor": _LORA_SF,
+                "bandwidth_hz": _LORA_BW,
+                "coding_rate": f"4/{_LORA_CR}",
+                "packet_count": len(pkts),
+                "peak_rssi_dbm": peak_rssi,
+                "payload_samples": payloads[:5],
+            },
+            engagement_id=engagement_id,
+        )
+        insert_finding(finding)
+        log.info(
+            f"FINDING [medium] lora_traffic_detected: {freq_mhz:.3f} MHz "
+            f"({len(pkts)} pkts)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Generic LoRa frequency scanner (multi-SF sweep)
+# ---------------------------------------------------------------------------
+
+def _lora_scan(dongle: WhadDongle, frequencies_mhz: list[float], duration_secs: int = 10) -> list[dict]:
+    """Scan LoRa frequencies using the whad.phy.connector.lora.LoRa connector.
+
+    Tries common spreading factors and bandwidths. Returns list of
+    received frame dicts with keys: frequency_mhz, sf, bw, payload_hex.
+    Falls back silently if the LoRa connector is not available.
+
+    Args:
+        dongle: WhadDongle with phy_dongle or ble_dongle.
+        frequencies_mhz: List of frequencies to scan in MHz.
+        duration_secs: Seconds to listen per frequency/config combination.
+
+    Returns:
+        List of received frame dicts.
+    """
+    try:
+        from whad.phy.connector.lora import LoRa
+    except ImportError:
+        try:
+            from whad.phy import LoRa
+        except ImportError:
+            log.debug("[S12] whad.phy.connector.lora.LoRa not importable — skipping LoRa scan")
+            return []
+
+    device = getattr(dongle, "phy_dongle", None) or getattr(dongle, "ble_dongle", None)
+    if device is None:
+        return []
+
+    results = []
+    # Common LoRa configurations to try
+    configs = [
+        {"sf": 7, "bw": 125000, "cr": 5},
+        {"sf": 9, "bw": 125000, "cr": 5},
+        {"sf": 12, "bw": 125000, "cr": 5},
+    ]
+
+    for freq in frequencies_mhz:
+        for cfg in configs:
+            lora = None
+            try:
+                lora = LoRa(device.device)
+                lora.sf = cfg["sf"]
+                lora.bw = cfg["bw"]
+                lora.cr = cfg["cr"]
+                lora.enable_crc(True)
+                lora.enable_explicit_mode(True)
+                lora.start()
+                log.debug(f"[S12][lora] Scanning {freq}MHz SF{cfg['sf']} BW{cfg['bw'] // 1000}kHz")
+                for pkt in lora.sniff(timeout=duration_secs):
+                    results.append({
+                        "frequency_mhz": freq,
+                        "sf": cfg["sf"],
+                        "bw": cfg["bw"],
+                        "payload_hex": bytes(pkt).hex(),
+                    })
+                    log.info(f"[S12][lora] Frame at {freq}MHz SF{cfg['sf']}: {bytes(pkt).hex()[:32]}")
+            except (AttributeError, NotImplementedError, TypeError) as exc:
+                log.debug(f"[S12][lora] LoRa connector not supported: {exc}")
+                return results  # Hardware doesn't support it, stop trying
+            except Exception as exc:
+                log.debug(f"[S12][lora] {freq}MHz SF{cfg['sf']} error: {exc}")
+            finally:
+                if lora is not None:
+                    try:
+                        lora.stop()
+                    except Exception:
+                        pass
+
+    return results
 
 
 # ---------------------------------------------------------------------------

@@ -173,6 +173,214 @@ def _parse_ad_records(raw_bytes: bytes) -> dict:
     return result
 
 
+def _extract_device_info(dev) -> dict:
+    """Extract normalised fields from a discover_devices() device object.
+
+    WHAD BLE device objects expose different attribute names across versions.
+    All lookups are defensive; missing fields fall back to safe defaults.
+    """
+    def _get(*attrs, default=None):
+        for attr in attrs:
+            val = getattr(dev, attr, None)
+            if val is not None:
+                return val
+        return default
+
+    bd_addr_raw = _get("address", "bd_address", "bd_addr", default="")
+    bd_addr = str(bd_addr_raw).upper().strip() if bd_addr_raw else ""
+
+    rssi = int(_get("rssi", default=0) or 0)
+
+    name_raw = _get("complete_name", "short_name", "name", default=None)
+    name = _sanitize_string(str(name_raw)) if name_raw is not None else None
+
+    connectable = bool(_get("connectable", default=False))
+
+    # Address type: check for a random flag or an explicit type attribute.
+    addr_type_raw = _get("address_type", "addr_type", default=None)
+    if addr_type_raw is not None:
+        addr_type = str(addr_type_raw).lower()
+        # Normalise WHAD enum strings like "AddressType.RANDOM" → "random"
+        if "." in addr_type:
+            addr_type = addr_type.rsplit(".", 1)[-1]
+        if addr_type not in (
+            "public", "random_static", "random_non_resolvable",
+            "random_resolvable", "random",
+        ):
+            addr_type = "random" if "rand" in addr_type else "public"
+    else:
+        addr_type = "unknown"
+
+    # Services: may be a list of UUID objects or strings.
+    svcs_raw = _get("services", "advertised_services", default=[]) or []
+    services = []
+    for s in svcs_raw:
+        svc_str = str(s).upper().strip()
+        if svc_str:
+            services.append(svc_str)
+
+    # Manufacturer data: may be bytes or a ManufacturerData object.
+    mfr_data_raw = _get("manufacturer_data", default=None)
+    company_id: int | None = None
+    manufacturer_bytes: bytes | None = None
+    if mfr_data_raw is not None:
+        if isinstance(mfr_data_raw, bytes) and len(mfr_data_raw) >= 2:
+            manufacturer_bytes = mfr_data_raw
+            company_id = int.from_bytes(mfr_data_raw[:2], "little")
+        elif hasattr(mfr_data_raw, "company_id"):
+            company_id = int(mfr_data_raw.company_id)
+            raw_bytes = getattr(mfr_data_raw, "data", None)
+            if isinstance(raw_bytes, bytes):
+                manufacturer_bytes = raw_bytes
+
+    tx_power = _get("tx_power", "tx_power_level", default=None)
+    if tx_power is not None:
+        try:
+            tx_power = int(tx_power)
+        except (TypeError, ValueError):
+            tx_power = None
+
+    return {
+        "bd_addr": bd_addr,
+        "rssi": rssi,
+        "name": name,
+        "connectable": connectable,
+        "addr_type": addr_type,
+        "services": services,
+        "company_id": company_id,
+        "manufacturer_bytes": manufacturer_bytes,
+        "tx_power": tx_power,
+    }
+
+
+def _upsert_discovered_device(
+    dev,
+    targets: dict,
+    engagement_id: str,
+    now,
+) -> None:
+    """Merge a discover_devices() device object into the shared targets dict.
+
+    Called from the discover_devices path only; targets dict is NOT shared with
+    the Ubertooth thread at this point (ubertooth thread uses _lock), so callers
+    must hold _lock before calling this function.
+    """
+    try:
+        info = _extract_device_info(dev)
+    except Exception as exc:
+        log.debug(f"[S1][discover] Device info extraction error: {exc}")
+        return
+
+    bd_addr = info["bd_addr"]
+    if not bd_addr:
+        return
+
+    if config.RSSI_MIN_FILTER and info["rssi"] < config.RSSI_MIN_FILTER:
+        return
+    if config.TARGET_FILTER and bd_addr not in config.TARGET_FILTER:
+        return
+
+    if bd_addr not in targets:
+        t = Target(
+            bd_address=bd_addr,
+            address_type=info["addr_type"],
+            adv_type="ADV_IND" if info["connectable"] else "ADV_NONCONN_IND",
+            name=info["name"],
+            manufacturer=None,
+            company_id=info["company_id"],
+            services=info["services"],
+            tx_power=info["tx_power"],
+            rssi_samples=[info["rssi"]] if info["rssi"] else [],
+            rssi_avg=float(info["rssi"]),
+            device_class="unknown",
+            connectable=info["connectable"],
+            first_seen=now,
+            last_seen=now,
+            raw_adv_records=[],
+            risk_score=0,
+            engagement_id=engagement_id,
+            channel=0,
+        )
+
+        if info["addr_type"] == "public":
+            oui_name = oui_lookup(bd_addr)
+            if oui_name:
+                t.manufacturer = oui_name
+
+        if info["company_id"] is not None:
+            _, mfr_name = decode_manufacturer(
+                info["manufacturer_bytes"] or b"\x00\x00"
+            )
+            t.manufacturer = mfr_name
+
+        t.device_class = classify_device(t)
+        t.risk_score = compute_risk_score(t)
+        targets[bd_addr] = t
+        _log_new_target(t)
+    else:
+        t = targets[bd_addr]
+        t.last_seen = now
+        if info["rssi"]:
+            t.rssi_samples.append(info["rssi"])
+            t.rssi_avg = sum(t.rssi_samples) / len(t.rssi_samples)
+        if info["name"] and not t.name:
+            t.name = info["name"]
+            t.device_class = classify_device(t)
+            t.risk_score = compute_risk_score(t)
+        for svc in info["services"]:
+            if svc not in t.services:
+                t.services.append(svc)
+
+    upsert_target(targets[bd_addr])
+
+
+def _run_discover_devices(
+    scanner,
+    dongle: "WhadDongle",
+    targets: dict,
+    lock: threading.Lock,
+    engagement_id: str,
+) -> bool:
+    """Attempt to scan using scanner.discover_devices().
+
+    Returns True if the method is supported and scanning completed (or was
+    interrupted). Returns False immediately if the method is absent or raises
+    NotImplementedError, signalling the caller to fall back to raw packet loop.
+    """
+    rssi_filter = config.RSSI_MIN_FILTER or None
+    gen = None
+    try:
+        gen = scanner.discover_devices(
+            minimal_rssi=rssi_filter,
+            timeout=config.SCAN_DURATION,
+            updates=True,
+        )
+    except (AttributeError, NotImplementedError) as exc:
+        log.debug(f"[S1] discover_devices() not available: {type(exc).__name__} — using raw loop")
+        return False
+    except TypeError:
+        # Some versions don't accept keyword arguments — retry bare.
+        try:
+            gen = scanner.discover_devices()
+        except Exception as exc2:
+            log.debug(f"[S1] discover_devices() failed: {exc2} — using raw loop")
+            return False
+
+    log.debug("[S1] Using scanner.discover_devices() path")
+    try:
+        for dev in gen:
+            now = datetime.now(timezone.utc)
+            with lock:
+                _upsert_discovered_device(dev, targets, engagement_id, now)
+    except KeyboardInterrupt:
+        log.info("Scan interrupted by user.")
+    except Exception as exc:
+        log.debug(f"[S1] discover_devices() iteration error: {exc}")
+        # A mid-iteration error is non-fatal; we keep whatever was collected.
+
+    return True
+
+
 def run(
     dongle: WhadDongle,
     engagement_id: str,
@@ -222,126 +430,138 @@ def run(
         )
         _ubertooth_thread.start()
 
+    # Primary BLE scan: try discover_devices() first; fall back to raw packet loop.
+    _used_discover = False
     try:
-        for pkt in dongle.sniff_iter(scanner, total_duration=config.SCAN_DURATION):
-            now = datetime.now(timezone.utc)
+        _used_discover = _run_discover_devices(
+            scanner, dongle, targets, _lock, engagement_id
+        )
+    except Exception as exc:
+        log.debug(f"[S1] discover_devices() outer error: {exc} — using raw loop")
 
-            try:
-                bd_addr = _extract_adv_addr(pkt)
-                if bd_addr is None:
-                    continue
-                bd_addr = bd_addr.upper()
-
-                rssi = 0
-                meta = getattr(pkt, "metadata", None)
-                if meta is not None:
-                    rssi = getattr(meta, "rssi", 0) or 0
-
-                # RSSI filter: drop devices below minimum signal threshold.
-                if config.RSSI_MIN_FILTER and rssi < config.RSSI_MIN_FILTER:
-                    continue
-
-                if (
-                    config.TARGET_FILTER
-                    and bd_addr not in config.TARGET_FILTER
-                ):
-                    continue
-
-                pdu = _pdu_type(pkt)
-
-                if pdu == "SCAN_RSP" and bd_addr in targets:
-                    raw_ad = _raw_ad_bytes(pkt)
-                    ad = _parse_ad_records(raw_ad)
-                    t = targets[bd_addr]
-                    t.last_seen = now
-                    if ad["name"] and not t.name:
-                        t.name = ad["name"]
-                        t.device_class = classify_device(t)
-                        t.risk_score = compute_risk_score(t)
-                    for svc in ad["services"]:
-                        if svc not in t.services:
-                            t.services.append(svc)
-                    upsert_target(t)
-                    continue
-
-                raw_ad = _raw_ad_bytes(pkt)
-                ad = _parse_ad_records(raw_ad)
-                addr_type = _addr_type_label(pkt, bd_addr)
-                connectable = pdu in ("ADV_IND", "ADV_DIRECT_IND")
-                channel = _extract_channel(pkt)
-
-                if bd_addr not in targets:
-                    t = Target(
-                        bd_address=bd_addr,
-                        address_type=addr_type,
-                        adv_type=pdu,
-                        name=ad["name"],
-                        manufacturer=None,
-                        company_id=ad["company_id"],
-                        services=ad["services"],
-                        tx_power=ad["tx_power"],
-                        rssi_samples=[rssi],
-                        rssi_avg=float(rssi),
-                        device_class="unknown",
-                        connectable=connectable,
-                        first_seen=now,
-                        last_seen=now,
-                        raw_adv_records=[raw_ad] if raw_ad else [],
-                        risk_score=0,
-                        engagement_id=engagement_id,
-                        channel=channel,
-                    )
-
-                    if addr_type == "public":
-                        oui_name = oui_lookup(bd_addr)
-                        if oui_name:
-                            t.manufacturer = oui_name
-
-                    if ad["company_id"] is not None:
-                        _, mfr_name = decode_manufacturer(
-                            ad["manufacturer_data"] or b"\x00\x00"
-                        )
-                        t.manufacturer = mfr_name
-
-                    t.device_class = classify_device(t)
-                    t.risk_score = compute_risk_score(t)
-                    targets[bd_addr] = t
-                    _log_new_target(t)
-
-                else:
-                    t = targets[bd_addr]
-                    t.last_seen = now
-                    t.rssi_samples.append(rssi)
-                    t.rssi_avg = sum(t.rssi_samples) / len(
-                        t.rssi_samples
-                    )
-
-                    raw_ad = _raw_ad_bytes(pkt)
-                    ad = _parse_ad_records(raw_ad)
-
-                    if ad["name"] and not t.name:
-                        t.name = ad["name"]
-                        t.device_class = classify_device(t)
-                        t.risk_score = compute_risk_score(t)
-
-                    for svc in ad["services"]:
-                        if svc not in t.services:
-                            t.services.append(svc)
-
-                upsert_target(targets[bd_addr])
-
-            except Exception as exc:
-                log.debug(f"Packet parse error: {exc}")
-                continue
-
-    except KeyboardInterrupt:
-        log.info("Scan interrupted by user.")
-    finally:
+    if not _used_discover:
         try:
-            detach_monitor(_monitor)
-            scanner.stop()
-        except Exception:
-            pass
+            for pkt in dongle.sniff_iter(scanner, total_duration=config.SCAN_DURATION):
+                now = datetime.now(timezone.utc)
+
+                try:
+                    bd_addr = _extract_adv_addr(pkt)
+                    if bd_addr is None:
+                        continue
+                    bd_addr = bd_addr.upper()
+
+                    rssi = 0
+                    meta = getattr(pkt, "metadata", None)
+                    if meta is not None:
+                        rssi = getattr(meta, "rssi", 0) or 0
+
+                    # RSSI filter: drop devices below minimum signal threshold.
+                    if config.RSSI_MIN_FILTER and rssi < config.RSSI_MIN_FILTER:
+                        continue
+
+                    if (
+                        config.TARGET_FILTER
+                        and bd_addr not in config.TARGET_FILTER
+                    ):
+                        continue
+
+                    pdu = _pdu_type(pkt)
+
+                    if pdu == "SCAN_RSP" and bd_addr in targets:
+                        raw_ad = _raw_ad_bytes(pkt)
+                        ad = _parse_ad_records(raw_ad)
+                        with _lock:
+                            t = targets[bd_addr]
+                            t.last_seen = now
+                            if ad["name"] and not t.name:
+                                t.name = ad["name"]
+                                t.device_class = classify_device(t)
+                                t.risk_score = compute_risk_score(t)
+                            for svc in ad["services"]:
+                                if svc not in t.services:
+                                    t.services.append(svc)
+                            upsert_target(t)
+                        continue
+
+                    raw_ad = _raw_ad_bytes(pkt)
+                    ad = _parse_ad_records(raw_ad)
+                    addr_type = _addr_type_label(pkt, bd_addr)
+                    connectable = pdu in ("ADV_IND", "ADV_DIRECT_IND")
+                    channel = _extract_channel(pkt)
+
+                    with _lock:
+                        if bd_addr not in targets:
+                            t = Target(
+                                bd_address=bd_addr,
+                                address_type=addr_type,
+                                adv_type=pdu,
+                                name=ad["name"],
+                                manufacturer=None,
+                                company_id=ad["company_id"],
+                                services=ad["services"],
+                                tx_power=ad["tx_power"],
+                                rssi_samples=[rssi],
+                                rssi_avg=float(rssi),
+                                device_class="unknown",
+                                connectable=connectable,
+                                first_seen=now,
+                                last_seen=now,
+                                raw_adv_records=[raw_ad] if raw_ad else [],
+                                risk_score=0,
+                                engagement_id=engagement_id,
+                                channel=channel,
+                            )
+
+                            if addr_type == "public":
+                                oui_name = oui_lookup(bd_addr)
+                                if oui_name:
+                                    t.manufacturer = oui_name
+
+                            if ad["company_id"] is not None:
+                                _, mfr_name = decode_manufacturer(
+                                    ad["manufacturer_data"] or b"\x00\x00"
+                                )
+                                t.manufacturer = mfr_name
+
+                            t.device_class = classify_device(t)
+                            t.risk_score = compute_risk_score(t)
+                            targets[bd_addr] = t
+                            _log_new_target(t)
+
+                        else:
+                            t = targets[bd_addr]
+                            t.last_seen = now
+                            t.rssi_samples.append(rssi)
+                            t.rssi_avg = sum(t.rssi_samples) / len(
+                                t.rssi_samples
+                            )
+
+                            raw_ad = _raw_ad_bytes(pkt)
+                            ad = _parse_ad_records(raw_ad)
+
+                            if ad["name"] and not t.name:
+                                t.name = ad["name"]
+                                t.device_class = classify_device(t)
+                                t.risk_score = compute_risk_score(t)
+
+                            for svc in ad["services"]:
+                                if svc not in t.services:
+                                    t.services.append(svc)
+
+                        upsert_target(targets[bd_addr])
+
+                except Exception as exc:
+                    log.debug(f"Packet parse error: {exc}")
+                    continue
+
+        except KeyboardInterrupt:
+            log.info("Scan interrupted by user.")
+
+    try:
+        detach_monitor(_monitor)
+        scanner.stop()
+    except Exception:
+        pass
 
     if _ubertooth_thread is not None:
         _ubertooth_thread.join(timeout=5.0)
