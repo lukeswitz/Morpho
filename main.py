@@ -272,7 +272,9 @@ def _banner(eng_id: str, name: str, location: str) -> None:
     line = "=" * 60
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     print(f"\n{line}")
-    print("  BLE RED TEAM FRAMEWORK")
+    print("  ▄▄▄▄  ▄▄ ▄▄ ▄▄▄▄  ▄▄ ▄▄ ██     ██  ▄▄▄  ▄▄ ▄▄ ▄▄▄▄▄  ▄▄▄▄ ")
+    print("  ██▄█▄ ██ ██ ██▄██ ▀███▀ ██ ▄█▄ ██ ██▀██ ██▄██ ██▄▄  ███▄▄ ")
+    print("  ██ ██ ▀███▀ ██▄█▀   █    ▀██▀██▀  ██▀██  ▀█▀  ██▄▄▄ ▄▄██▀ ")
     print(f"  Engagement : {name} ({eng_id})")
     print(f"  Location   : {location or 'unspecified'}")
     print(f"  Interface  : {config.INTERFACE}")
