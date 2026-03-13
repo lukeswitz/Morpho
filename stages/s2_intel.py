@@ -703,35 +703,17 @@ def _passive_gatt_from_pcap(pcap: str, addr: str) -> list[dict]:
 
 
 def _print_summary(connections: list[Connection]) -> None:
-    from core.db import get_targets
-    
     if not connections:
-        print("\n" + "─" * 76)
-        print("  STAGE 2 SUMMARY -- 0 connections captured")
-        print("─" * 76)
-        print("  No CONNECT_IND PDUs observed during sniff window.")
-        print("─" * 76)
+        log.info("S2 complete: 0 connections captured in sniff window")
         return
 
-    eng_id = connections[0].engagement_id
-    targets_db = get_targets(eng_id)
-    targets_by_addr = {
-        t["bd_address"]: t["name"]
-        for t in targets_db
-    }
-
-    print("\n" + "─" * 80)
-    print(f"  STAGE 2 SUMMARY -- {len(connections)} connection(s) captured")
-    print("─" * 80)
-    print(f"  {'CENTRAL':<20} {'PERIPHERAL':<20} {'ACCESS ADDR':<10}  E L P  DEVICE NAME")
-    print("─" * 80)
+    log.info(f"S2 complete: {len(connections)} connection(s) captured")
+    log.info(f"  {'CENTRAL':<18} {'PERIPHERAL':<18} {'ACCESS ADDR':<12} E L P")
     for c in connections:
-        periph_name = (targets_by_addr.get(c.peripheral_addr) or "—")[:14]
         enc  = "Y" if c.encrypted else "N"
         lgcy = "Y" if c.legacy_pairing_observed else "N"
         pln  = "Y" if c.plaintext_data_captured else "N"
-        print(
-            f"  {c.central_addr:<20} {c.peripheral_addr:<20} "
-            f"0x{c.access_address:08X}  {enc} {lgcy} {pln}  {periph_name}"
+        log.info(
+            f"  {c.central_addr:<18} {c.peripheral_addr:<18} "
+            f"0x{c.access_address:08X}  {enc} {lgcy} {pln}"
         )
-    print("─" * 80 + "\n")

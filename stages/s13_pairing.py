@@ -295,32 +295,32 @@ def _print_summary(
     accepted_modes: list[dict],
     keys_captured: list[dict],
 ) -> None:
-    print("\n" + "─" * 76)
-    print("  STAGE 13 SUMMARY -- SMP Pairing Vulnerability Scan")
-    print("─" * 76)
-    print(f"  {'Target':<18}: {target.bd_address}")
-    print(f"  {'Name':<18}: {target.name or '(unnamed)'}")
-    print(f"  {'Modes tried':<18}: {len(_MATRIX)}")
-    print(f"  {'Modes accepted':<18}: {len(accepted_modes)}")
+    log.info("\n" + "─" * 76)
+    log.info("  STAGE 13 SUMMARY -- SMP Pairing Vulnerability Scan")
+    log.info("─" * 76)
+    log.info(f"  {'Target':<18}: {target.bd_address}")
+    log.info(f"  {'Name':<18}: {target.name or '(unnamed)'}")
+    log.info(f"  {'Modes tried':<18}: {len(_MATRIX)}")
+    log.info(f"  {'Modes accepted':<18}: {len(accepted_modes)}")
 
     if accepted_modes:
-        print()
-        print("  Accepted pairing modes (no MITM required):")
+
+        log.info("  Accepted pairing modes (no MITM required):")
         for m in accepted_modes:
-            print(f"    • {m['label']}")
+            log.info(f"    • {m['label']}")
 
     if keys_captured:
-        print()
-        print("  Captured bonding keys:")
+
+        log.info("  Captured bonding keys:")
         for k in keys_captured:
             mode  = k.get("mode", "?")
             parts = []
             if "ltk"  in k: parts.append(f"LTK={k['ltk'][:16]}...")
             if "irk"  in k: parts.append(f"IRK={k['irk'][:16]}...")
             if "csrk" in k: parts.append(f"CSRK={k['csrk'][:16]}...")
-            print(f"    [{mode}] {', '.join(parts)}")
+            log.info(f"    [{mode}] {', '.join(parts)}")
 
     if not accepted_modes:
-        print("  Result: target rejected all unauthenticated pairing modes.")
+        log.info("  Result: target rejected all unauthenticated pairing modes.")
 
-    print("─" * 76 + "\n")
+    log.info("─" * 76 + "\n")

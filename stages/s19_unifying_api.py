@@ -29,7 +29,7 @@ import time
 from core.dongle import WhadDongle
 from core.models import Finding
 from core.db import insert_finding
-from core.logger import get_logger
+from core.logger import get_logger, prompt_line
 import config
 
 log = get_logger("s19_unifying_api")
@@ -327,7 +327,7 @@ def _run_ducky(dongle: WhadDongle, engagement_id: str) -> None:
     script_path = config.UNIFYING_DUCKY_SCRIPT
     if not script_path:
         try:
-            script_path = input(
+            script_path = prompt_line(
                 "  DuckyScript file path: "
             ).strip()
         except (KeyboardInterrupt, EOFError):
@@ -469,29 +469,28 @@ def _run_ducky(dongle: WhadDongle, engagement_id: str) -> None:
             f"({keys_sent} keys from {os.path.basename(script_path)!r})"
         )
 
-    print("\n" + "─" * 76)
-    print("  STAGE 19 SUMMARY -- Unifying API / DuckyScript")
-    print("─" * 76)
-    print(f"  {'Target address':<22}: {target_addr}")
-    print(f"  {'Synchronized':<22}: {'yes' if synced else 'no'}")
-    print(f"  {'Script':<22}: {os.path.basename(script_path)}")
-    print(f"  {'Keys injected':<22}: {keys_sent}")
-    print("─" * 76 + "\n")
+    log.info("─" * 76)
+    log.info("STAGE 19 SUMMARY -- Unifying API / DuckyScript")
+    log.info(f"  Target address        : {target_addr}")
+    log.info(f"  Synchronized          : {'yes' if synced else 'no'}")
+    log.info(f"  Script                : {os.path.basename(script_path)}")
+    log.info(f"  Keys injected         : {keys_sent}")
+    log.info("─" * 76)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _ask_mode() -> str:
-    print("\n  Stage 19 — Logitech Unifying Python API:")
-    print("    [M]  Mouse    — synchronize + inject cursor moves + click")
-    print("    [K]  Keyboard — synchronize + inject text string")
-    print("    [D]  Ducky    — synchronize + replay DuckyScript file")
-    print("    [E]  Dongle   — emulate Unifying receiver to capture pairing")
-    print("    [I]  Injector — inject a raw Unifying frame by hex payload")
-    print("    [S]  Skip")
+    log.info("Stage 19 — Logitech Unifying Python API:")
+    log.info("  [M] Mouse    — sync + inject cursor moves + click")
+    log.info("  [K] Keyboard — sync + inject text string")
+    log.info("  [D] Ducky    — sync + replay DuckyScript file")
+    log.info("  [E] Dongle   — emulate Unifying receiver for pairing capture")
+    log.info("  [I] Injector — inject a raw Unifying frame by hex payload")
+    log.info("  [S] Skip")
     while True:
         try:
-            c = input("  Select [M/K/D/E/I/S]: ").strip().upper()
+            c = prompt_line("  Select [M/K/D/E/I/S]: ").strip().upper()
         except (KeyboardInterrupt, EOFError):
             return "skip"
         if c == "M":
@@ -506,14 +505,14 @@ def _ask_mode() -> str:
             return "injector"
         if c in ("S", ""):
             return "skip"
-        print("  Please enter M, K, D, E, I, or S.")
+        log.warning("  Please enter M, K, D, E, I, or S.")
 
 
 def _prompt_address(prompt: str) -> str | None:
-    print(f"\n  {prompt}")
-    print("  Format: XX:XX:XX:XX:XX (5-byte hex, e.g. 29:b9:81:2c:a4)")
+    log.info(f"  {prompt}")
+    log.info("  Format: XX:XX:XX:XX:XX (5-byte hex, e.g. 29:b9:81:2c:a4)")
     try:
-        raw = input("  ESB address [empty to abort]: ").strip()
+        raw = prompt_line("  ESB address [empty to abort]: ").strip()
     except (KeyboardInterrupt, EOFError):
         return None
     return raw.lower() if raw else None
@@ -522,29 +521,27 @@ def _prompt_address(prompt: str) -> str | None:
 def _print_mouse_summary(
     addr: str, synced: bool, moves: int, clicks: int
 ) -> None:
-    print("\n" + "─" * 76)
-    print("  STAGE 19 SUMMARY -- Unifying API / Mouse Injection")
-    print("─" * 76)
-    print(f"  {'Target address':<22}: {addr}")
-    print(f"  {'Synchronized':<22}: {'yes' if synced else 'no'}")
-    print(f"  {'Moves injected':<22}: {moves}")
-    print(f"  {'Clicks injected':<22}: {clicks}")
     result = "SUCCESS" if (moves > 0 or clicks > 0) else "FAILED"
-    print(f"  {'Result':<22}: {result}")
-    print("─" * 76 + "\n")
+    log.info("─" * 76)
+    log.info("STAGE 19 SUMMARY -- Unifying API / Mouse Injection")
+    log.info(f"  Target address        : {addr}")
+    log.info(f"  Synchronized          : {'yes' if synced else 'no'}")
+    log.info(f"  Moves injected        : {moves}")
+    log.info(f"  Clicks injected       : {clicks}")
+    log.info(f"  Result                : {result}")
+    log.info("─" * 76)
 
 
 def _print_keyboard_summary(
     addr: str, synced: bool, inject_ok: bool, text: str
 ) -> None:
-    print("\n" + "─" * 76)
-    print("  STAGE 19 SUMMARY -- Unifying API / Keyboard Injection")
-    print("─" * 76)
-    print(f"  {'Target address':<22}: {addr}")
-    print(f"  {'Synchronized':<22}: {'yes' if synced else 'no'}")
-    print(f"  {'Text injected':<22}: {text!r}")
-    print(f"  {'Result':<22}: {'SUCCESS' if inject_ok else 'FAILED'}")
-    print("─" * 76 + "\n")
+    log.info("─" * 76)
+    log.info("STAGE 19 SUMMARY -- Unifying API / Keyboard Injection")
+    log.info(f"  Target address        : {addr}")
+    log.info(f"  Synchronized          : {'yes' if synced else 'no'}")
+    log.info(f"  Text injected         : {text!r}")
+    log.info(f"  Result                : {'SUCCESS' if inject_ok else 'FAILED'}")
+    log.info("─" * 76)
 
 
 # ── Dongle emulation sub-mode ─────────────────────────────────────────────────
@@ -566,13 +563,12 @@ def _run_dongle_emulation(dongle: WhadDongle, engagement_id: str) -> None:
     timeout = config.UNIFYING_SYNC_TIMEOUT
     paired = _emulate_unifying_dongle(dongle, target_addr, timeout=timeout)
 
-    print("\n" + "─" * 76)
-    print("  STAGE 19 SUMMARY -- Unifying API / Dongle Emulation")
-    print("─" * 76)
-    print(f"  {'Target address':<22}: {target_addr}")
-    print(f"  {'Timeout':<22}: {timeout}s")
-    print(f"  {'Device paired':<22}: {'yes' if paired else 'no'}")
-    print("─" * 76 + "\n")
+    log.info("─" * 76)
+    log.info("STAGE 19 SUMMARY -- Unifying API / Dongle Emulation")
+    log.info(f"  Target address        : {target_addr}")
+    log.info(f"  Timeout               : {timeout}s")
+    log.info(f"  Device paired         : {'yes' if paired else 'no'}")
+    log.info("─" * 76)
 
     if paired:
         finding = Finding(
@@ -616,7 +612,7 @@ def _run_injector(dongle: WhadDongle, engagement_id: str) -> None:
         return
 
     try:
-        payload_hex = input("  Hex payload to inject (e.g. 050000000000): ").strip()
+        payload_hex = prompt_line("  Hex payload to inject (e.g. 050000000000): ").strip()
     except (KeyboardInterrupt, EOFError):
         log.info("[S19][inject] Aborted.")
         return
@@ -627,13 +623,12 @@ def _run_injector(dongle: WhadDongle, engagement_id: str) -> None:
 
     ok = _inject_unifying_frame(dongle, target_addr, payload_hex)
 
-    print("\n" + "─" * 76)
-    print("  STAGE 19 SUMMARY -- Unifying API / Raw Frame Injection")
-    print("─" * 76)
-    print(f"  {'Target address':<22}: {target_addr}")
-    print(f"  {'Payload':<22}: {payload_hex}")
-    print(f"  {'Result':<22}: {'SUCCESS' if ok else 'FAILED'}")
-    print("─" * 76 + "\n")
+    log.info("─" * 76)
+    log.info("STAGE 19 SUMMARY -- Unifying API / Raw Frame Injection")
+    log.info(f"  Target address        : {target_addr}")
+    log.info(f"  Payload               : {payload_hex}")
+    log.info(f"  Result                : {'SUCCESS' if ok else 'FAILED'}")
+    log.info("─" * 76)
 
     if ok:
         finding = Finding(

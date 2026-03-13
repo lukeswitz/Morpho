@@ -25,7 +25,7 @@ from whad.device import WhadDevice
 from core.dongle import WhadDongle
 from core.models import Connection, Finding, Target
 from core.db import insert_finding
-from core.logger import get_logger
+from core.logger import get_logger, prompt_line
 from core.pcap import pcap_path
 import config
 
@@ -210,14 +210,14 @@ def _prompt_substitution_rules() -> list[tuple[bytes, bytes]]:
     is used productively. Returns list of (find_bytes, replace_bytes) tuples.
     """
     rules: list[tuple[bytes, bytes]] = []
-    print(
+    log.info(
         "\n  Payload substitution — enter rules while capture runs in background.\n"
         "  Specify hex byte sequences to find and replace in captured packets.\n"
         "  Leave 'Find' empty to skip and inject raw capture.\n"
     )
     while True:
         try:
-            find_hex = input(
+            find_hex = prompt_line(
                 f"  Rule {len(rules) + 1} — Find    (hex, empty=done): "
             ).strip().replace(" ", "")
         except (KeyboardInterrupt, EOFError):
@@ -227,22 +227,22 @@ def _prompt_substitution_rules() -> list[tuple[bytes, bytes]]:
         try:
             find_b = bytes.fromhex(find_hex)
         except ValueError:
-            print("    Invalid hex — try again.")
+            log.info("    Invalid hex — try again.")
             continue
         try:
-            repl_hex = input(
+            repl_hex = prompt_line(
                 f"  Rule {len(rules) + 1} — Replace (hex, empty=delete): "
             ).strip().replace(" ", "")
             repl_b = bytes.fromhex(repl_hex) if repl_hex else b""
         except ValueError:
-            print("    Invalid hex — rule skipped.")
+            log.info("    Invalid hex — rule skipped.")
             continue
         except (KeyboardInterrupt, EOFError):
             break
         rules.append((find_b, repl_b))
         log.debug(f"[S9][adv] Rule: {find_hex} → {repl_hex or '(delete)'}")
     if rules:
-        print(f"  {len(rules)} substitution rule(s) queued.\n")
+        log.info(f"  {len(rules)} substitution rule(s) queued.\n")
     return rules
 
 
@@ -303,7 +303,7 @@ def _run_injectable_mode(
     if conn is None:
         log.warning(f"[S9][injectable] No S2 connection record for {addr}.")
         try:
-            ans = input(
+            ans = prompt_line(
                 f"\n  No Stage 2 data for {addr}. "
                 "Run a connection capture now to collect parameters? [yes/no]: "
             ).strip().lower()
@@ -447,13 +447,13 @@ def _print_summary(
 ) -> None:
     mode_label = "ADV Injection" if mode == "adv" else "InjectaBLE"
     status = "SUCCESS" if success else "FAILED"
-    print("\n" + "─" * 76)
-    print(f"  STAGE 9 SUMMARY -- {mode_label}")
-    print("─" * 76)
-    print(f"  {'Target':<18}: {target.bd_address}")
-    print(f"  {'Device name':<18}: {target.name or '(unnamed)'}")
-    print(f"  {'Mode':<18}: {mode_label}")
-    print(f"  {'Result':<18}: {status}")
+    log.info("\n" + "─" * 76)
+    log.info(f"  STAGE 9 SUMMARY -- {mode_label}")
+    log.info("─" * 76)
+    log.info(f"  {'Target':<18}: {target.bd_address}")
+    log.info(f"  {'Device name':<18}: {target.name or '(unnamed)'}")
+    log.info(f"  {'Mode':<18}: {mode_label}")
+    log.info(f"  {'Result':<18}: {status}")
     if pcap:
-        print(f"  {'PCAP':<18}: {pcap}")
-    print("─" * 76 + "\n")
+        log.info(f"  {'PCAP':<18}: {pcap}")
+    log.info("─" * 76 + "\n")

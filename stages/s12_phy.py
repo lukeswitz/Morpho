@@ -519,19 +519,19 @@ def _capture_hot_frequencies(
 # ---------------------------------------------------------------------------
 
 def _print_summary(band_activity: dict, total_packets: int) -> None:
-    print("\n" + "─" * 76)
-    print("  STAGE 12 SUMMARY -- PHY / ISM Band Survey (2.4 GHz)")
-    print("─" * 76)
-    print(f"  {'Frequencies swept':<28}: {len(_2G4_FREQS_MHZ)}")
-    print(f"  {'Active 5 MHz bands':<28}: {len(band_activity)}")
-    print(f"  {'Total packets captured':<28}: {total_packets}")
+    log.info("\n" + "─" * 76)
+    log.info("  STAGE 12 SUMMARY -- PHY / ISM Band Survey (2.4 GHz)")
+    log.info("─" * 76)
+    log.info(f"  {'Frequencies swept':<28}: {len(_2G4_FREQS_MHZ)}")
+    log.info(f"  {'Active 5 MHz bands':<28}: {len(band_activity)}")
+    log.info(f"  {'Total packets captured':<28}: {total_packets}")
     if band_activity:
-        print()
-        print("  Active bands:")
+
+        log.info("  Active bands:")
         for band_mhz, info in sorted(band_activity.items()):
             rssi = f"{info['peak_rssi']} dBm" if info["peak_rssi"] else "?"
-            print(
+            log.info(
                 f"    {band_mhz:4d}–{band_mhz + _BAND_STEP_MHZ} MHz  "
                 f"pkts={info['pkt_count']:<5}  RSSI={rssi}"
             )
-    print("─" * 76 + "\n")
+    log.info("─" * 76 + "\n")

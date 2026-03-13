@@ -344,14 +344,13 @@ def _record_findings(devices: list[dict], engagement_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _print_summary(devices: list[dict]) -> None:
-    print("\n" + "─" * 70)
-    print(f"  STAGE 22 SUMMARY — RF4CE RECON — {len(devices)} device(s) observed")
-    print("─" * 70)
+    log.info("─" * 70)
+    log.info(f"STAGE 22 SUMMARY — RF4CE RECON — {len(devices)} device(s) observed")
+    log.info("─" * 70)
     if not devices:
-        print(f"  No RF4CE traffic observed on channels {RF4CE_CHANNELS}.")
+        log.info(f"  No RF4CE traffic observed on channels {RF4CE_CHANNELS}.")
     else:
-        print(f"  {'Address':<24}  {'Ch':<4}  {'Type'}")
-        print(f"  {'─' * 22}  {'──':<4}  {'─────────'}")
+        log.info(f"  {'Address':<24}  {'Ch':<4}  Type")
         for d in devices:
-            print(f"  {d['address']:<24}  {d['channel']:<4}  {d['type']}")
-    print("─" * 70 + "\n")
+            log.info(f"  {d['address']:<24}  {d['channel']:<4}  {d['type']}")
+    log.info("─" * 70)

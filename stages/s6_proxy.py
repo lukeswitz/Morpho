@@ -25,7 +25,7 @@ from whad.device import WhadDevice
 from core.dongle import WhadDongle
 from core.models import Target, Finding
 from core.db import insert_finding
-from core.logger import get_logger
+from core.logger import get_logger, prompt_line
 from core.pcap import pcap_path
 import config
 
@@ -146,7 +146,7 @@ def _ask_link_layer() -> bool:
     GATT-only monitors. Essential for catching encryption negotiation and pairing.
     """
     try:
-        raw = input(
+        raw = prompt_line(
             "\n  Use link-layer proxy mode (all L2CAP, not just GATT)? [y/N]: "
         ).strip().lower()
     except (EOFError, KeyboardInterrupt):
@@ -207,16 +207,16 @@ def _select_proxy_interface() -> bool:
         return True
 
     # Multiple candidates — prompt operator to choose
-    print("\n  Stage 6 — Select proxy interface (second RF adapter):")
-    print(f"  (Attack interface in use: {config.INTERFACE})\n")
+    log.info("\n  Stage 6 — Select proxy interface (second RF adapter):")
+    log.info(f"  (Attack interface in use: {config.INTERFACE})\n")
     for i, (name, display) in enumerate(candidates, 1):
         marker = "  <-- current default" if name == current else ""
-        print(f"  [{i}] {display}{marker}")
-    print("  [s] Skip Stage 6\n")
+        log.info(f"  [{i}] {display}{marker}")
+    log.info("  [s] Skip Stage 6\n")
 
     while True:
         try:
-            raw = input("  Select [1-N/s]: ").strip().lower()
+            raw = prompt_line("  Select [1-N/s]: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             return False
         if raw == "s":
@@ -230,7 +230,7 @@ def _select_proxy_interface() -> bool:
                 return True
         except ValueError:
             pass
-        print(f"  Please enter 1-{len(candidates)} or 's' to skip.")
+        log.info(f"  Please enter 1-{len(candidates)} or 's' to skip.")
 
 
 def _discover_interfaces() -> list[tuple[str, str]]:
@@ -534,19 +534,19 @@ def _print_summary(
     if len(pcap_display) > 52:
         pcap_display = "…" + pcap_path_str[-51:]
 
-    print("\n" + "─" * 76)
-    print("  STAGE 6 SUMMARY -- MITM Proxy")
-    print("─" * 76)
-    print(f"  {'Target':<18}: {target.bd_address}")
-    print(f"  {'Name':<18}: {target.name or '(unnamed)'}")
-    print(f"  {'Device class':<18}: {target.device_class}")
-    print(f"  {'Attack interface':<18}: {config.INTERFACE}")
-    print(f"  {'Proxy interface':<18}: {config.PROXY_INTERFACE}")
-    print(f"  {'PCAP':<18}: {pcap_display}")
-    print(f"  {'Conn accepted':<18}: {'yes' if connections_accepted else 'no'}")
-    print(f"  {'Data intercepted':<18}: {'yes' if data_intercepted else 'no'}")
-    print(f"  {'Severity':<18}: {severity.upper()}")
-    print(f"\n  Analyze captured traffic:")
-    print(f"    wireshark {pcap_path_str}")
-    print(f"    tshark -r {pcap_path_str} -Y btle")
-    print("─" * 76 + "\n")
+    log.info("\n" + "─" * 76)
+    log.info("  STAGE 6 SUMMARY -- MITM Proxy")
+    log.info("─" * 76)
+    log.info(f"  {'Target':<18}: {target.bd_address}")
+    log.info(f"  {'Name':<18}: {target.name or '(unnamed)'}")
+    log.info(f"  {'Device class':<18}: {target.device_class}")
+    log.info(f"  {'Attack interface':<18}: {config.INTERFACE}")
+    log.info(f"  {'Proxy interface':<18}: {config.PROXY_INTERFACE}")
+    log.info(f"  {'PCAP':<18}: {pcap_display}")
+    log.info(f"  {'Conn accepted':<18}: {'yes' if connections_accepted else 'no'}")
+    log.info(f"  {'Data intercepted':<18}: {'yes' if data_intercepted else 'no'}")
+    log.info(f"  {'Severity':<18}: {severity.upper()}")
+    log.info(f"\n  Analyze captured traffic:")
+    log.info(f"    wireshark {pcap_path_str}")
+    log.info(f"    tshark -r {pcap_path_str} -Y btle")
+    log.info("─" * 76 + "\n")

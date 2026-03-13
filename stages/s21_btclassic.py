@@ -260,8 +260,8 @@ def _auth_mode_weak(mode: str) -> bool:
 def _ubertooth_sniff(ubertooth_dongle: WhadDongle, engagement_id: str) -> None:
     """Passive BR/EDR piconet sniff using ubertooth-rx or ubertooth-br."""
     log.info(f"[S21] Ubertooth passive BR/EDR sniff ({_UBERTOOTH_SECS}s) ...")
-    print(f"\n  [S21] Ubertooth passive BR/EDR sniff — {_UBERTOOTH_SECS}s")
-    print("       Listening for BR/EDR piconet traffic on frequency hop ...")
+    log.info(f"\n  [S21] Ubertooth passive BR/EDR sniff — {_UBERTOOTH_SECS}s")
+    log.info("       Listening for BR/EDR piconet traffic on frequency hop ...")
 
     tool = None
     for candidate in ("ubertooth-br", "ubertooth-rx"):
@@ -307,7 +307,7 @@ def _ubertooth_sniff(ubertooth_dongle: WhadDongle, engagement_id: str) -> None:
             log.debug(f"[ubertooth] {line}")
             if re.search(r"(packet|pkt|LAP|UAP|bdaddr)", line, re.I):
                 packets_seen += 1
-                print(f"  [ubertooth] {line}")
+                log.info(f"  [ubertooth] {line}")
         proc.terminate()
         try:
             proc.wait(timeout=3)
@@ -430,32 +430,32 @@ def _record_piconet_finding(
 # ── Summary ────────────────────────────────────────────────────────────────────
 
 def _print_summary(devices: list[dict]) -> None:
-    print("\n" + "─" * 76)
-    print("  STAGE 21 SUMMARY -- Bluetooth Classic (BR/EDR) Scout")
-    print("─" * 76)
-    print(f"  {'Devices found':<22}: {len(devices)}")
+    log.info("\n" + "─" * 76)
+    log.info("  STAGE 21 SUMMARY -- Bluetooth Classic (BR/EDR) Scout")
+    log.info("─" * 76)
+    log.info(f"  {'Devices found':<22}: {len(devices)}")
     if devices:
-        print()
-        print(f"  {'ADDRESS':<20}  {'NAME':<24}  SERVICES")
-        print("  " + "─" * 64)
+
+        log.info(f"  {'ADDRESS':<20}  {'NAME':<24}  SERVICES")
+        log.info("  " + "─" * 64)
         for d in devices[:20]:
             svcs = len(d.get("services", []))
             risky = len(d.get("risky_services", []))
             risky_tag = f" [{risky} risky!]" if risky else ""
-            print(
+            log.info(
                 f"  {d['addr']:<20}  {d.get('name','(unnamed)')[:24]:<24}  "
                 f"{svcs} service(s){risky_tag}"
             )
-    print("─" * 76 + "\n")
+    log.info("─" * 76 + "\n")
 
 
 def _print_no_hardware() -> None:
-    print("\n" + "─" * 76)
-    print("  STAGE 21 — Bluetooth Classic Scout (skipped)")
-    print("─" * 76)
-    print("  No BR/EDR hardware detected:")
-    print("    — HCI adapter (hci0): not found or BlueZ not running")
-    print("    — Ubertooth One: not connected (--ubertooth-interface ubertooth0)")
-    print()
-    print("  To enable this stage, connect one of the above and rerun.")
-    print("─" * 76 + "\n")
+    log.info("\n" + "─" * 76)
+    log.info("  STAGE 21 — Bluetooth Classic Scout (skipped)")
+    log.info("─" * 76)
+    log.info("  No BR/EDR hardware detected:")
+    log.info("    — HCI adapter (hci0): not found or BlueZ not running")
+    log.info("    — Ubertooth One: not connected (--ubertooth-interface ubertooth0)")
+
+    log.info("  To enable this stage, connect one of the above and rerun.")
+    log.info("─" * 76 + "\n")

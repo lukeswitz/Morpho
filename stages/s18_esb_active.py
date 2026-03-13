@@ -27,7 +27,7 @@ import time
 from core.dongle import WhadDongle
 from core.models import Finding
 from core.db import insert_finding
-from core.logger import get_logger
+from core.logger import get_logger, prompt_line
 import config
 
 log = get_logger("s18_esb_active")
@@ -430,15 +430,14 @@ def _run_replay(dongle: WhadDongle, engagement_id: str) -> None:
         engagement_id=engagement_id,
     ))
     log.info(f"FINDING [{severity}] esb_replay_accepted: {target_addr}")
-    print("\n" + "─" * 76)
-    print("  STAGE 18 SUMMARY -- ESB Replay Attack")
-    print("─" * 76)
-    print(f"  Target           : {target_addr}")
-    print(f"  Frames captured  : {len(captured_payloads)}")
-    print(f"  Frames replayed  : {replayed}")
     ack_str = "YES *** REPLAY VULN ***" if acked > 0 else "no"
-    print(f"  ACKed            : {acked}  {ack_str}")
-    print("─" * 76 + "\n")
+    log.info("─" * 76)
+    log.info("STAGE 18 SUMMARY -- ESB Replay Attack")
+    log.info(f"  Target           : {target_addr}")
+    log.info(f"  Frames captured  : {len(captured_payloads)}")
+    log.info(f"  Frames replayed  : {replayed}")
+    log.info(f"  ACKed            : {acked}  {ack_str}")
+    log.info("─" * 76)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -460,14 +459,14 @@ def _looks_plaintext(payload: bytes) -> bool:
 
 
 def _ask_mode() -> str:
-    print("\n  Stage 18 — ESB PRX/PTX Active Attack:")
-    print("    [R]  PRX  — capture frames sent to a target address")
-    print("    [T]  PTX  — synchronize and inject unauthenticated frames")
-    print("    [Y]  REPLAY — PRX capture then PTX replay (tests replay vulnerability)")
-    print("    [S]  Skip")
+    log.info("Stage 18 — ESB PRX/PTX Active Attack:")
+    log.info("  [R] PRX    — capture frames sent to a target address")
+    log.info("  [T] PTX    — synchronize and inject unauthenticated frames")
+    log.info("  [Y] REPLAY — PRX capture then PTX replay (replay vulnerability test)")
+    log.info("  [S] Skip")
     while True:
         try:
-            c = input("  Select [R/T/Y/S]: ").strip().upper()
+            c = prompt_line("  Select [R/T/Y/S]: ").strip().upper()
         except (KeyboardInterrupt, EOFError):
             return "skip"
         if c == "R":
@@ -478,23 +477,23 @@ def _ask_mode() -> str:
             return "replay"
         if c in ("S", ""):
             return "skip"
-        print("  Please enter R, T, Y, or S.")
+        log.warning("  Please enter R, T, Y, or S.")
 
 
 def _prompt_esb_address(prompt: str) -> str | None:
-    print(f"\n  {prompt}")
-    print("  Format: XX:XX:XX:XX:XX (5-byte hex, e.g. 29:b9:81:2c:a4)")
+    log.info(f"  {prompt}")
+    log.info("  Format: XX:XX:XX:XX:XX (5-byte hex, e.g. 29:b9:81:2c:a4)")
     try:
-        raw = input("  ESB address [empty to abort]: ").strip()
+        raw = prompt_line("  ESB address [empty to abort]: ").strip()
     except (KeyboardInterrupt, EOFError):
         return None
     return raw.lower() if raw else None
 
 
 def _prompt_custom_payload(default: bytes) -> bytes | None:
-    print(f"\n  PTX payload (hex). Default: {default.hex()}")
+    log.info(f"  PTX payload (hex). Default: {default.hex()}")
     try:
-        raw = input("  Payload hex [enter for default]: ").strip()
+        raw = prompt_line("  Payload hex [enter for default]: ").strip()
     except (KeyboardInterrupt, EOFError):
         return None
     if not raw:
@@ -502,7 +501,7 @@ def _prompt_custom_payload(default: bytes) -> bytes | None:
     try:
         return bytes.fromhex(raw.replace(" ", ""))
     except ValueError:
-        print("  Invalid hex — using default.")
+        log.warning("  Invalid hex — using default.")
         return None
 
 
@@ -511,31 +510,27 @@ def _prompt_custom_payload(default: bytes) -> bytes | None:
 def _print_prx_summary(
     addr: str, frames: list[dict], plaintext_count: int, ack_payload: bytes | None
 ) -> None:
-    print("\n" + "─" * 76)
-    print("  STAGE 18 SUMMARY -- ESB PRX Interception")
-    print("─" * 76)
-    print(f"  {'Target address':<22}: {addr}")
-    print(f"  {'Frames captured':<22}: {len(frames)}")
-    print(f"  {'Plaintext frames':<22}: {plaintext_count}")
     ack_str = ack_payload.hex() if ack_payload is not None else "disabled"
-    print(f"  {'ACK payload mode':<22}: {ack_str}")
-    if frames:
-        print(f"\n  Samples (first 5):")
-        for f in frames[:5]:
-            tag = " [PLAIN]" if f["plaintext"] else ""
-            print(f"    ch={f['channel']}  len={f['length']:3d}  {f['payload_hex'][:32]}{tag}")
-    print("─" * 76 + "\n")
+    log.info("─" * 76)
+    log.info("STAGE 18 SUMMARY -- ESB PRX Interception")
+    log.info(f"  Target address        : {addr}")
+    log.info(f"  Frames captured       : {len(frames)}")
+    log.info(f"  Plaintext frames      : {plaintext_count}")
+    log.info(f"  ACK payload mode      : {ack_str}")
+    for f in frames[:5]:
+        tag = " [PLAIN]" if f["plaintext"] else ""
+        log.info(f"    ch={f['channel']}  len={f['length']:3d}  {f['payload_hex'][:32]}{tag}")
+    log.info("─" * 76)
 
 
 def _print_ptx_summary(
     addr: str, synced: bool, inject_ok: bool, ack_received: bool, payload: bytes
 ) -> None:
-    print("\n" + "─" * 76)
-    print("  STAGE 18 SUMMARY -- ESB PTX Injection")
-    print("─" * 76)
-    print(f"  {'Target address':<22}: {addr}")
-    print(f"  {'Synchronized':<22}: {'yes' if synced else 'no'}")
-    print(f"  {'Frame transmitted':<22}: {'yes' if inject_ok else 'no'}")
-    print(f"  {'ACK received':<22}: {'YES — receiver accepted' if ack_received else 'no'}")
-    print(f"  {'Payload':<22}: {payload.hex()}")
-    print("─" * 76 + "\n")
+    log.info("─" * 76)
+    log.info("STAGE 18 SUMMARY -- ESB PTX Injection")
+    log.info(f"  Target address        : {addr}")
+    log.info(f"  Synchronized          : {'yes' if synced else 'no'}")
+    log.info(f"  Frame transmitted     : {'yes' if inject_ok else 'no'}")
+    log.info(f"  ACK received          : {'YES — receiver accepted' if ack_received else 'no'}")
+    log.info(f"  Payload               : {payload.hex()}")
+    log.info("─" * 76)

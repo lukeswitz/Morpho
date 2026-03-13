@@ -402,19 +402,19 @@ def _record_findings(
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 def _print_summary(devices: dict, plaintext_addrs: dict[str, list[str]]) -> None:
-    print("\n" + "─" * 76)
-    print("  STAGE 14 SUMMARY -- ESB Raw Channel Scan")
-    print("─" * 76)
-    print(f"  {'Channels swept':<20}: {len(_ESB_CHANNELS)}")
-    print(f"  {'ESB devices found':<20}: {len(devices)}")
-    print(f"  {'Unencrypted traffic':<20}: {len(plaintext_addrs)} device(s)")
+    log.info("\n" + "─" * 76)
+    log.info("  STAGE 14 SUMMARY -- ESB Raw Channel Scan")
+    log.info("─" * 76)
+    log.info(f"  {'Channels swept':<20}: {len(_ESB_CHANNELS)}")
+    log.info(f"  {'ESB devices found':<20}: {len(devices)}")
+    log.info(f"  {'Unencrypted traffic':<20}: {len(plaintext_addrs)} device(s)")
     if devices:
-        print()
-        print("  Detected devices:")
+
+        log.info("  Detected devices:")
         for addr, info in sorted(devices.items()):
             chs = sorted(info["channels"])
             enc_flag = "  [PLAINTEXT]" if addr in plaintext_addrs else ""
-            print(f"    {addr:<24}  channels={chs}  packets={info['packet_count']}{enc_flag}")
+            log.info(f"    {addr:<24}  channels={chs}  packets={info['packet_count']}{enc_flag}")
     else:
-        print("  Result: no ESB devices detected on scanned channels.")
-    print("─" * 76 + "\n")
+        log.info("  Result: no ESB devices detected on scanned channels.")
+    log.info("─" * 76 + "\n")

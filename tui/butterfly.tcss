@@ -1,0 +1,270 @@
+/* Butterfly-RedTeam TUI — dark terminal aesthetic */
+
+Screen {
+    background: #0a0a0f;
+    color: #c0cfe0;
+}
+
+/* ── Dashboard three-panel layout ── */
+
+#main-panels {
+    height: 1fr;
+}
+
+StageStatusWidget {
+    width: 26;
+    height: 100%;
+    background: #0a0a0f;
+    border: solid #1a4060;
+    border-title-color: #2080b0;
+    border-title-style: bold;
+    padding: 0;
+}
+
+.stage-pending  { color: #2a3040; }
+.stage-running  { color: #f0c040; text-style: bold; }
+.stage-complete { color: #40c060; }
+.stage-skipped  { color: #1e2530; text-style: strike; }
+.stage-error    { color: #e04040; text-style: bold; }
+
+RichLog {
+    border: solid #1a4060;
+    background: #07070d;
+    width: 1fr;
+    height: 100%;
+    color: #90a8c0;
+    display: none;
+}
+
+TargetTableWidget {
+    border: solid #3a1050;
+    width: 2fr;
+    height: 100%;
+    background: #0a0a0f;
+}
+
+DataTable > .datatable--header {
+    background: #1a0830;
+    color: #c090e0;
+    text-style: bold;
+}
+
+DataTable > .datatable--cursor {
+    background: #2a1050;
+    color: #ffffff;
+}
+
+DataTable > .datatable--zebra-stripe {
+    background: #0d0d15;
+}
+
+/* ── Prompt bar (bottom) ── */
+
+PromptBar {
+    layout: horizontal;
+    dock: bottom;
+    height: 3;
+    border: solid #806000;
+    background: #0d0a00;
+    color: #f0c040;
+    display: none;
+    padding: 0 1;
+}
+
+PromptBar > Label {
+    color: #f0c040;
+    text-style: bold;
+    width: auto;
+}
+
+PromptBar > Input {
+    background: #0d0a00;
+    border: none;
+    color: #f0c040;
+    width: 1fr;
+}
+
+/* ── Launch screen ── */
+
+LaunchScreen {
+    align: center middle;
+    background: #0a0a0f;
+}
+
+.launch-box {
+    border: solid #1a4060;
+    width: 72;
+    height: auto;
+    padding: 1 2;
+    background: #0a0a0f;
+}
+
+.bbs-art {
+    color: #2080b0;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+.launch-section-label {
+    color: #c090e0;
+    text-style: bold;
+    margin-top: 1;
+}
+
+.launch-box > Label {
+    color: #c090e0;
+    text-style: bold;
+}
+
+.launch-box > Input {
+    background: #07070d;
+    border: solid #1a4060;
+    color: #90d0ff;
+    margin-bottom: 0;
+}
+
+.stage-grid {
+    grid-size: 2;
+    grid-gutter: 0;
+    height: auto;
+}
+
+.stage-grid > Checkbox {
+    color: #6090b0;
+    background: #0a0a0f;
+}
+
+#btn-launch {
+    background: #0a0a0f;
+    border: solid #2080b0;
+    color: #90d0ff;
+    width: 100%;
+    margin-top: 1;
+}
+
+#btn-launch:hover {
+    background: #071520;
+    border: solid #40a0d0;
+}
+
+/* ── Active gate modal ── */
+
+ActiveGateModal {
+    align: center middle;
+}
+
+.gate-box {
+    border: solid #806000;
+    background: #0d0a00;
+    color: #f0c040;
+    width: 60;
+    height: auto;
+    padding: 1 2;
+}
+
+.gate-title {
+    color: #f0c040;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+.gate-desc {
+    color: #90a8c0;
+    margin-bottom: 1;
+}
+
+.gate-warning {
+    color: #e06020;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+.btn-yes   { background: #1a5030; color: #40e080; text-style: bold; }
+.btn-skip  { background: #403000; color: #f0c040; text-style: bold; }
+.btn-abort { background: #500010; color: #ff6060; text-style: bold; }
+
+/* ── Select targets modal ── */
+
+SelectTargetsModal {
+    align: center middle;
+}
+
+.targets-box {
+    border: solid #3a1050;
+    background: #0a0a0f;
+    color: #c0cfe0;
+    width: 90;
+    height: auto;
+    max-height: 40;
+    padding: 1 2;
+}
+
+.targets-title {
+    color: #c090e0;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+/* ── GATT Shell Screen (Hackers / 80s CRT aesthetic) ── */
+
+GattShellScreen {
+    background: #000000;
+    color: #00ff41;
+    layout: vertical;
+}
+
+#shell-outer {
+    width: 100%;
+    height: 100%;
+    background: #000000;
+}
+
+#shell-info {
+    color: #33aa55;
+    background: #000d03;
+    text-style: bold;
+    padding: 0 1;
+    height: 1;
+}
+
+#shell-divider {
+    color: #1a4d2a;
+    height: 1;
+}
+
+#shell-divider2 {
+    color: #1a4d2a;
+    height: 1;
+}
+
+#shell-log {
+    background: #000000;
+    color: #22dd66;
+    width: 100%;
+    height: 1fr;
+    border: none;
+}
+
+#shell-prompt-row {
+    height: 1;
+    background: #000d03;
+    padding: 0 1;
+}
+
+#shell-prompt-label {
+    color: #00ff41;
+    text-style: bold;
+    width: auto;
+}
+
+#shell-input {
+    background: #000000;
+    border: none;
+    color: #00ff41;
+    width: 1fr;
+}
+
+GattShellScreen > Footer {
+    background: #000d03;
+    color: #1a6632;
+}

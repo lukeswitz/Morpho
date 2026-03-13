@@ -1,13 +1,24 @@
 import argparse
 import shutil
+import sys
 import time
 import uuid
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from core.dongle import WhadDongle, HardwareMap, DongleCaps, detect_hardware
 from core.db import init_db, upsert_engagement
-from core.logger import get_logger, stage_banner, active_gate, select_targets
+from core.logger import (
+    get_logger, stage_banner, stage_finished, finish_current_stage,
+    active_gate, select_targets, prompt_line, install_tui,
+    shell_write, push_shell, pop_shell, enable_redact, disable_redact,
+    scan_status_update, add_finding,
+)
 import config
+
+if TYPE_CHECKING:
+    from tui.screens.launch import LaunchConfig
+    from tui.bridge import PromptBridge
 
 log = get_logger("main")
 
@@ -235,6 +246,19 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable DEBUG-level logging",
     )
+    p.add_argument(
+        "--plain",
+        action="store_true",
+        help="Disable TUI; use plain-text prompts (SSH fallback mode)",
+    )
+    p.add_argument(
+        "--redact",
+        action="store_true",
+        help=(
+            "Redact BD addresses and device names from all log/TUI output "
+            "(for screenshots and demos)"
+        ),
+    )
     return p.parse_args()
 
 
@@ -266,115 +290,184 @@ def _apply_args(args: argparse.Namespace) -> None:
                 for h in logger.handlers:
                     h.setLevel(_logging.DEBUG)
         _logging.root.setLevel(_logging.DEBUG)
+    if args.redact:
+        config.REDACT_OUTPUT = True
+        from core.logger import enable_redact
+        enable_redact()
+
+
+def build_cfg_from_args(args: argparse.Namespace) -> "LaunchConfig":
+    """Convert argparse Namespace to LaunchConfig for plain-mode runs."""
+    from tui.screens.launch import LaunchConfig
+
+    if args.stages.strip().lower() == "auto":
+        stages: set[int] = set()  # empty = auto-detect in run_stages
+    else:
+        stages = {int(s.strip()) for s in args.stages.split(",") if s.strip().isdigit()}
+    if args.opt_in:
+        stages |= _OPT_IN_STAGES
+
+    return LaunchConfig(
+        name=args.name,
+        location=args.location,
+        interface=args.interface,
+        esb_interface=args.esb_interface or "",
+        phy_interface=args.phy_interface or "",
+        ubertooth_interface=args.ubertooth_interface or "",
+        proxy_interface=args.proxy_interface,
+        scan_duration=args.scan_duration,
+        stages=stages,
+        no_gate=args.no_gate,
+        debug=args.debug,
+    )
 
 
 def _banner(eng_id: str, name: str, location: str) -> None:
-    line = "=" * 60
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    print(f"\n{line}")
-    print("  ▄▄▄▄  ▄▄ ▄▄ ▄▄▄▄  ▄▄ ▄▄ ██     ██  ▄▄▄  ▄▄ ▄▄ ▄▄▄▄▄  ▄▄▄▄ ")
-    print("  ██▄█▄ ██ ██ ██▄██ ▀███▀ ██ ▄█▄ ██ ██▀██ ██▄██ ██▄▄  ███▄▄ ")
-    print("  ██ ██ ▀███▀ ██▄█▀   █    ▀██▀██▀  ██▀██  ▀█▀  ██▄▄▄ ▄▄██▀ ")
-    print(f"  Engagement : {name} ({eng_id})")
-    print(f"  Location   : {location or 'unspecified'}")
-    print(f"  Interface  : {config.INTERFACE}")
-    print(f"  Proxy iface: {config.PROXY_INTERFACE}")
-    print(f"  Started    : {ts}")
-    print(f"{line}\n")
+    log.info("=" * 60)
+    log.info("  Butterfly RedTeam")
+    log.info(f"  Engagement : {name} ({eng_id})")
+    log.info(f"  Location   : {location or 'unspecified'}")
+    log.info(f"  Interface  : {config.INTERFACE}")
+    log.info(f"  Proxy iface: {config.PROXY_INTERFACE}")
+    log.info(f"  Started    : {ts}")
+    log.info("=" * 60)
 
 
 def _caps_banner(hw: HardwareMap) -> None:
-    line = "─" * 49
-    print(f"\n  DONGLE CAPABILITIES")
+    log.info("  DONGLE CAPABILITIES")
     for dongle in [hw.ble_dongle, hw.esb_dongle, hw.phy_dongle, hw.ubertooth_dongle]:
         if dongle is None:
             continue
-        print(f"  {line}")
-        print(f"  [{dongle.interface}]")
+        log.info(f"  [{dongle.interface}]")
         for ln in dongle.caps.summary_lines():
-            print(ln)
-    print(f"  {line}\n")
+            log.info(ln)
 
 
 def _hardware_banner(hw: HardwareMap) -> None:
-    line = "─" * 62
-    print(f"\n  HARDWARE DETECTED")
-    print(f"  {line}")
+    log.info("  HARDWARE DETECTED")
     if hw.ble_dongle:
         ble_stages = "BLE stages 1-3, 5, 7-8, 11-13, 15, 21 (opt-in: 4, 6, 9, 16, 20)"
-        print(f"  [{hw.ble_dongle.interface}]")
-        print(f"    Type     : {hw.ble_dongle.caps.device_type}")
-        print(f"    Handles  : {ble_stages}")
+        log.info(f"  [{hw.ble_dongle.interface}]  type={hw.ble_dongle.caps.device_type}")
+        log.info(f"    Handles  : {ble_stages}")
     else:
-        print(f"  [no BLE device] stages 1-9, 11-13, 15-16 unavailable")
-        print(f"    (interface {config.INTERFACE} not found — use --interface to override)")
+        log.warning(f"  [no BLE device] stages 1-9, 11-13, 15-16 unavailable")
+        log.warning(f"    (interface {config.INTERFACE} not found — use --interface to override)")
     if hw.esb_dongle:
-        print(f"  [{hw.esb_dongle.interface}]")
-        print(f"    Type     : {hw.esb_dongle.caps.device_type}")
-        print(f"    Handles  : ESB/Unifying stages 10, 14, 18, 19")
+        log.info(f"  [{hw.esb_dongle.interface}]  type={hw.esb_dongle.caps.device_type}")
+        log.info("    Handles  : ESB/Unifying stages 10, 14, 18, 19")
     else:
         fallback = hw.ble_dongle.interface if hw.ble_dongle else "unavailable"
-        print(f"  [no ESB device] stages 10, 14 fall back to {fallback}")
+        log.info(f"  [no ESB device] stages 10, 14 fall back to {fallback}")
     if hw.phy_dongle:
-        print(f"  [{hw.phy_dongle.interface}]")
-        print(f"    Type     : {hw.phy_dongle.caps.device_type}")
-        print(f"    Handles  : sub-GHz PHY stage 17")
+        log.info(f"  [{hw.phy_dongle.interface}]  type={hw.phy_dongle.caps.device_type}")
+        log.info("    Handles  : sub-GHz PHY stage 17")
     else:
-        print(f"  [no sub-GHz PHY device] stage 17 will be skipped if requested")
+        log.info("  [no sub-GHz PHY device] stage 17 will be skipped if requested")
     if hw.ubertooth_dongle:
-        print(f"  [{hw.ubertooth_dongle.interface}]")
-        print(f"    Type     : {hw.ubertooth_dongle.caps.device_type}")
-        print(f"    Handles  : supplementary passive BLE sniffer (S1/S2 extended range)")
-    print(f"  {line}\n")
+        log.info(f"  [{hw.ubertooth_dongle.interface}]  type={hw.ubertooth_dongle.caps.device_type}")
+        log.info("    Handles  : supplementary passive BLE sniffer (S1/S2 extended range)")
 
 
-def main() -> None:
-    args = _parse_args()
-    _apply_args(args)
+def run_stages(cfg: "LaunchConfig", bridge: "PromptBridge") -> None:
+    """
+    Execute the stage loop. Called either directly (--plain mode) or from
+    ButterflyApp's worker thread (TUI mode).
+    """
+    import os as _os
 
-    eng_id = args.engagement or uuid.uuid4().hex[:12]
-    config.PCAP_DIR.mkdir(parents=True, exist_ok=True)
-    config.REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    # 1. Only wire bridge into logger when the TUI is actually running.
+    # In plain mode the bridge has no app_call; routing prompts through it
+    # would block forever on _event.wait() with nothing to resolve.
+    _tui_mode = bridge._app_call is not None
+    if _tui_mode:
+        install_tui(bridge)
+    _orig_stdout = sys.stdout
+    _orig_stderr = sys.stderr
+    _devnull = None
+    if _tui_mode:
+        import logging as _log_mod
 
-    init_db()
-    upsert_engagement(eng_id, args.name, args.location)
+        # StreamHandler instances created by get_logger() capture the sys.stdout
+        # reference at construction time — reassigning sys.stdout later has NO
+        # effect on them.  They must be stripped from every logger so that the
+        # TuiLogHandler on root is the only output path.
+        for _logger_obj in list(_log_mod.Logger.manager.loggerDict.values()):
+            if isinstance(_logger_obj, _log_mod.Logger):
+                _logger_obj.handlers = [
+                    h for h in _logger_obj.handlers
+                    if not isinstance(h, _log_mod.StreamHandler)
+                ]
+                # Silence WHAD's per-packet machinery — thousands of records
+                # per second during scanning that are useless in the TUI.
+                if _logger_obj.name.startswith("whad."):
+                    _logger_obj.setLevel(_log_mod.WARNING)
+        _log_mod.root.handlers = [
+            h for h in _log_mod.root.handlers
+            if not isinstance(h, _log_mod.StreamHandler)
+            or type(h).__name__ == "TuiLogHandler"
+        ]
 
-    _banner(eng_id, args.name, args.location)
-
-    _stages_arg = args.stages.strip().lower()
-
-    hw = detect_hardware(
-        config.INTERFACE,
-        config.ESB_INTERFACE,
-        config.PHY_SUBGHZ_INTERFACE,
-        config.UBERTOOTH_INTERFACE,
-    )
-    _caps_banner(hw)
-    _hardware_banner(hw)
-
-    if _stages_arg == "auto":
-        stages_requested = _stages_from_hardware(hw)
-        if args.opt_in:
-            stages_requested |= _OPT_IN_STAGES
-            log.info(f"[--opt-in] Added opt-in stages: {sorted(_OPT_IN_STAGES)}")
-        _print_auto_stages(stages_requested)
-    else:
-        stages_requested = {
-            int(s.strip()) for s in args.stages.split(",") if s.strip().isdigit()
-        }
-        if args.opt_in:
-            stages_requested |= _OPT_IN_STAGES
-            log.info(f"[--opt-in] Added opt-in stages: {sorted(_OPT_IN_STAGES)}")
-        _warn_unsupported_stages(stages_requested, hw)
-
-    targets = []
-    connections = []
-    # addr → writable value_handles found by S5 (used by S7 to skip re-profile)
-    gatt_writable: dict[str, list[int]] = {}
-    # addr → full GATT profile from S5 (used by S8 for semantic PoC)
-    gatt_profiles: dict[str, list[dict]] = {}
+        # Redirect sys.stdout/stderr so print() calls go nowhere.
+        # Do NOT touch the underlying fd 1/2 — Textual renders by writing to fd 1.
+        _devnull = open(_os.devnull, "w")
+        sys.stdout = _devnull
+        sys.stderr = _devnull
 
     try:
+        # 2. Apply config from LaunchConfig → config module globals
+        import logging as _logging
+        config.INTERFACE = cfg.interface
+        config.SCAN_DURATION = cfg.scan_duration
+        if cfg.no_gate:
+            config.ACTIVE_GATE = False
+        config.PROXY_INTERFACE = cfg.proxy_interface
+        if cfg.esb_interface:
+            config.ESB_INTERFACE = cfg.esb_interface
+        if cfg.phy_interface:
+            config.PHY_SUBGHZ_INTERFACE = cfg.phy_interface
+        if cfg.ubertooth_interface:
+            config.UBERTOOTH_INTERFACE = cfg.ubertooth_interface
+        if cfg.debug:
+            for logger in _logging.Logger.manager.loggerDict.values():
+                if isinstance(logger, _logging.Logger):
+                    logger.setLevel(_logging.DEBUG)
+                    for h in logger.handlers:
+                        h.setLevel(_logging.DEBUG)
+            _logging.root.setLevel(_logging.DEBUG)
+
+        # 3. Engagement init
+        eng_id = uuid.uuid4().hex[:12]
+        config.PCAP_DIR.mkdir(parents=True, exist_ok=True)
+        config.REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        init_db()
+        upsert_engagement(eng_id, cfg.name, cfg.location)
+        _banner(eng_id, cfg.name, cfg.location)
+
+        # 4. Hardware detection
+        hw = detect_hardware(
+            config.INTERFACE,
+            config.ESB_INTERFACE,
+            config.PHY_SUBGHZ_INTERFACE,
+            config.UBERTOOTH_INTERFACE,
+        )
+        _caps_banner(hw)
+        _hardware_banner(hw)
+
+        # 5. Stage selection — cfg.stages is empty set when "auto" was requested
+        if not cfg.stages:
+            stages_requested = _stages_from_hardware(hw)
+            _print_auto_stages(stages_requested)
+        else:
+            stages_requested = cfg.stages
+            _warn_unsupported_stages(stages_requested, hw)
+
+        # 6. Shared data structures
+        targets = []
+        connections = []
+        gatt_writable: dict[str, list[int]] = {}
+        gatt_profiles: dict[str, list[dict]] = {}
+
         if 1 in stages_requested:
             if hw.ble_dongle is None and hw.ubertooth_dongle is None:
                 log.warning("[S1] No BLE or Ubertooth device available — scan skipped.")
@@ -382,7 +475,11 @@ def main() -> None:
                 from stages import s1_map
 
                 stage_banner(1, "Environment Mapping", passive=True)
-                targets = s1_map.run(hw.ble_dongle, eng_id, ubertooth_dongle=hw.ubertooth_dongle)
+                targets = s1_map.run(
+                    hw.ble_dongle, eng_id,
+                    ubertooth_dongle=hw.ubertooth_dongle,
+                    target_callback=bridge.notify_target_found,
+                )
                 log.info(
                     f"Stage 1 complete: {len(targets)} targets, "
                     f"{sum(1 for t in targets if t.connectable)} connectable"
@@ -402,6 +499,8 @@ def main() -> None:
                             f"[S2] Passive GATT profile available for {addr}: "
                             f"{len(profile)} char(s)"
                         )
+                    if profile:
+                        add_finding(addr, len(profile))
                 log.info(
                     f"Stage 2 complete: {len(connections)} connections observed"
                 )
@@ -489,17 +588,29 @@ def main() -> None:
                     ):
                         from stages import s5_interact
                         for t in gatt_picks:
+                            scan_status_update(t.bd_address, "S05")
                             handles, profile = s5_interact.run(hw.ble_dongle, t, eng_id)
                             if handles:
                                 gatt_writable[t.bd_address] = handles
                             if profile:
                                 gatt_profiles[t.bd_address] = profile
-                            if profile:
-                                ans = input(
-                                    f"\n  Enter GATT shell for {t.bd_address}? [y/N] "
-                                ).strip().lower()
+                            add_finding(t.bd_address, len(handles) + len(profile))
+                            if profile and t.connectable:
+                                log.info(
+                                    f"[S5] {t.bd_address}: {len(profile)} char(s) found. "
+                                    "Enter GATT shell? [y/N]"
+                                )
+                                ans = (
+                                    prompt_line(
+                                        f"Enter GATT shell for {t.bd_address}? [y/N] "
+                                    )
+                                    .strip()
+                                    .lower()
+                                )
                                 if ans == "y":
-                                    s5_interact.shell(hw.ble_dongle, t, profile, eng_id)
+                                    s5_interact.shell(
+                                        hw.ble_dongle, t, profile or [], eng_id
+                                    )
                 else:
                     log.info("Stage 5 skipped by operator.")
             else:
@@ -548,18 +659,14 @@ def main() -> None:
                         t for t in connectable if t.bd_address in gatt_writable
                     ]
                     if s5_fuzz_targets:
-                        print(
-                            f"\n  Stage 7 — S5 found writable characteristics on "
-                            f"{len(s5_fuzz_targets)} device(s):\n"
+                        log.info(
+                            f"[S7] S5 found writable characteristics on "
+                            f"{len(s5_fuzz_targets)} device(s):"
                         )
                         for t in s5_fuzz_targets:
                             h = gatt_writable[t.bd_address]
                             name = (t.name or "—")[:20]
-                            print(
-                                f"    {t.bd_address:<20}  "
-                                f"{name:<20}  "
-                                f"handles={h}"
-                            )
+                            log.info(f"  {t.bd_address:<20}  {name:<20}  handles={h}")
                         fuzz_picks = s5_fuzz_targets
                     else:
                         fuzz_picks = select_targets(
@@ -584,12 +691,15 @@ def main() -> None:
                     ):
                         from stages import s7_fuzz
                         for t in fuzz_picks:
+                            scan_status_update(t.bd_address, "S07")
                             found = s7_fuzz.run(
                                 hw.ble_dongle, t, eng_id,
                                 prepped_handles=gatt_writable.get(t.bd_address),
                             )
-                            if found and t.bd_address not in gatt_writable:
-                                gatt_writable[t.bd_address] = found
+                            if found:
+                                add_finding(t.bd_address, len(found))
+                                if t.bd_address not in gatt_writable:
+                                    gatt_writable[t.bd_address] = found
                 else:
                     log.info("Stage 7 skipped by operator.")
             else:
@@ -613,11 +723,12 @@ def main() -> None:
                     "Authorized targets only.",
                 ):
                     from stages import s8_poc
-                    _name_input = input(
+                    _name_input = prompt_line(
                         "  Custom name for 0x2A00 rename [BLE-PoC]: "
                     ).strip()
                     poc_name = _name_input if _name_input else "BLE-PoC"
                     for t in poc_targets:
+                        scan_status_update(t.bd_address, "S08")
                         s8_poc.run(
                             hw.ble_dongle, t, eng_id,
                             gatt_profiles.get(t.bd_address, []),
@@ -808,6 +919,7 @@ def main() -> None:
                 ):
                     from stages import s13_pairing
                     for idx, t in enumerate(pairing_targets):
+                        scan_status_update(t.bd_address, "S13")
                         s13_pairing.run(hw.ble_dongle, t, eng_id)
                         if idx < len(pairing_targets) - 1:
                             time.sleep(3.0)  # dongle recovery between targets
@@ -873,22 +985,58 @@ def main() -> None:
 
     except KeyboardInterrupt:
         log.info("Run aborted by user.")
+        finish_current_stage(error=True)
+    except BaseException as exc:
+        import traceback as _tb
+        if isinstance(exc, Exception):
+            log.error(f"Fatal error in stage runner: {exc}", exc_info=True)
+            finish_current_stage(error=True)
+        else:
+            raise
     finally:
-        if hw.ble_dongle:
-            hw.ble_dongle.close()
-        if hw.esb_dongle:
-            hw.esb_dongle.close()
-        if hw.phy_dongle:
-            hw.phy_dongle.close()
-        if hw.ubertooth_dongle:
-            hw.ubertooth_dongle.close()
+        finish_current_stage()
+        if _devnull is not None:
+            # Restore fd 1/2 before closing devnull
+            _orig_fd1 = _os.open("/dev/stdout", _os.O_WRONLY) if hasattr(_os, "O_WRONLY") else -1
+            try:
+                _os.dup2(_orig_stdout.fileno(), 1)
+                _os.dup2(_orig_stderr.fileno(), 2)
+            except Exception:
+                pass
+            sys.stdout = _orig_stdout
+            sys.stderr = _orig_stderr
+            _devnull.close()
+        hw = locals().get("hw")
+        if hw:
+            if hw.ble_dongle:
+                hw.ble_dongle.close()
+            if hw.esb_dongle:
+                hw.esb_dongle.close()
+            if hw.phy_dongle:
+                hw.phy_dongle.close()
+            if hw.ubertooth_dongle:
+                hw.ubertooth_dongle.close()
 
     from output.markdown_report import generate as gen_md
     from output.json_report import generate as gen_json
-    gen_md(eng_id, args.name, args.location)
-    gen_json(eng_id, args.name, args.location)
+    gen_md(eng_id, cfg.name, cfg.location)
+    gen_json(eng_id, cfg.name, cfg.location)
 
     _emit_summary(eng_id)
+
+
+def main() -> None:
+    args = _parse_args()
+
+    if getattr(args, "plain", False) or not sys.stdout.isatty():
+        # Plain-text mode: run directly with stdin prompts
+        from tui.bridge import PromptBridge
+        run_stages(build_cfg_from_args(args), PromptBridge())
+    else:
+        # TUI mode: launch Textual app
+        from tui.bridge import PromptBridge
+        from tui.app import ButterflyApp
+        ButterflyApp(PromptBridge(), run_stages).run()
 
 
 def _stages_from_hardware(hw: HardwareMap) -> set[int]:
@@ -937,7 +1085,7 @@ def _hci_available() -> bool:
 
 def _print_auto_stages(stages: set[int]) -> None:
     nums = ", ".join(str(s) for s in sorted(stages))
-    print(f"  Auto-selected stages : {nums}\n")
+    log.info(f"  Auto-selected stages : {nums}")
 
 
 def _warn_unsupported_stages(stages: set[int], hw: HardwareMap) -> None:
@@ -996,34 +1144,30 @@ def _warn_unsupported_stages(stages: set[int], hw: HardwareMap) -> None:
 
 def _ask_inject_mode() -> str:
     """Prompt operator to select ADV injection or InjectaBLE connection mode."""
-    print("\n  Stage 9 — Select injection mode:")
-    print("    [A]  ADV injection  — flood/replay target advertisements")
-    print("                         (scan DoS / device discovery cache poisoning)")
-    print("    [I]  InjectaBLE     — inject PDUs into active BLE connection")
-    print("                         (needs S2 connection parameters: AA, CRC, hop)")
-    print("                         If no S2 data exists, you will be offered a")
-    print("                         live capture before injection proceeds.")
+    log.info("Stage 9 — Select injection mode:")
+    log.info("  [A]  ADV injection  — flood/replay advertisements (scan DoS / cache poisoning)")
+    log.info("  [I]  InjectaBLE     — inject PDUs into active BLE connection (needs S2 params)")
     while True:
         try:
-            choice = input("  Select mode [A/I]: ").strip().upper()
+            choice = prompt_line("  Select mode [A/I]: ").strip().upper()
         except (KeyboardInterrupt, EOFError):
             return "adv"
         if choice in ("A", ""):
             return "adv"
         if choice == "I":
             return "injectable"
-        print("  Please enter A or I.")
+        log.warning("  Please enter A or I.")
 
 
 def _ask_zigbee_mode() -> str:
     """Prompt operator to select ZigBee mode."""
-    print("\n  Stage 11 — Select ZigBee mode:")
-    print("    [P]  Passive     — sniff channels 11-26, recover keys, decrypt traffic")
-    print("    [C]  Coordinator — create rogue PAN, open join window, capture joins")
-    print("    [E]  EndDevice   — join a real PAN as device, capture group traffic/inject")
+    log.info("Stage 11 — Select ZigBee mode:")
+    log.info("  [P]  Passive     — sniff channels 11-26, recover keys, decrypt traffic")
+    log.info("  [C]  Coordinator — create rogue PAN, open join window, capture joins")
+    log.info("  [E]  EndDevice   — join a real PAN as device, capture group traffic/inject")
     while True:
         try:
-            choice = input("  Select mode [P/C/E]: ").strip().upper()
+            choice = prompt_line("  Select mode [P/C/E]: ").strip().upper()
         except (KeyboardInterrupt, EOFError):
             return "passive"
         if choice in ("P", ""):
@@ -1032,19 +1176,19 @@ def _ask_zigbee_mode() -> str:
             return "coordinator"
         if choice == "E":
             return "enddevice"
-        print("  Please enter P, C, or E.")
+        log.warning("  Please enter P, C, or E.")
 
 
 def _ask_unifying_mode() -> str:
     """Prompt operator to select Unifying attack mode."""
-    print("\n  Stage 10 — Select Unifying mode:")
-    print("    [S]  Sniff   — passive scan, keylog, wanalyze PCAP pipeline")
-    print("    [I]  Inject  — MouseJack: inject text keystrokes into receiver")
-    print("    [D]  Ducky   — MouseJack: replay DuckyScript file (-d) with locale")
-    print("    [M]  Mouse   — inject cursor movement and click (scripted or relay)")
+    log.info("Stage 10 — Select Unifying mode:")
+    log.info("  [S]  Sniff   — passive scan, keylog, wanalyze PCAP pipeline")
+    log.info("  [I]  Inject  — MouseJack: inject keystrokes into receiver")
+    log.info("  [D]  Ducky   — MouseJack: replay DuckyScript file with locale")
+    log.info("  [M]  Mouse   — inject cursor movement and click (scripted or relay)")
     while True:
         try:
-            choice = input("  Select mode [S/I/D/M]: ").strip().upper()
+            choice = prompt_line("  Select mode [S/I/D/M]: ").strip().upper()
         except (KeyboardInterrupt, EOFError):
             return "sniff"
         if choice in ("S", ""):
@@ -1055,7 +1199,7 @@ def _ask_unifying_mode() -> str:
             return "ducky"
         if choice == "M":
             return "mouse"
-        print("  Please enter S, I, D, or M.")
+        log.warning("  Please enter S, I, D, or M.")
 
 
 def _emit_summary(eng_id: str) -> None:
@@ -1071,14 +1215,14 @@ def _emit_summary(eng_id: str) -> None:
         total_sightings = conn.execute("SELECT COUNT(*) FROM targets").fetchone()[0]
         total_engagements = conn.execute("SELECT COUNT(*) FROM engagements").fetchone()[0]
 
-    print("\n" + "=" * 60)
-    print(f"  RUN COMPLETE — engagement {eng_id}")
-    print(f"  Targets this run : {len(targets)}")
-    print(
+    log.info("=" * 60)
+    log.info(f"  RUN COMPLETE — engagement {eng_id}")
+    log.info(f"  Targets this run : {len(targets)}")
+    log.info(
         f"  Unique devices   : {unique_devices} "
         f"({total_sightings} sightings across {total_engagements} run(s))"
     )
-    print(f"  Findings         : {len(findings)}")
+    log.info(f"  Findings         : {len(findings)}")
 
     sev_counts: dict[str, int] = {}
     for f in findings:
@@ -1087,10 +1231,10 @@ def _emit_summary(eng_id: str) -> None:
     for sev in ("critical", "high", "medium", "low", "info"):
         count = sev_counts.get(sev, 0)
         if count:
-            print(f"    {sev:<12} {count}")
+            log.info(f"    {sev:<12} {count}")
 
     if findings:
-        print("\n  Finding details:")
+        log.info("  Finding details:")
         for f in sorted(
             findings,
             key=lambda x: ("critical", "high", "medium", "low", "info").index(
@@ -1099,17 +1243,13 @@ def _emit_summary(eng_id: str) -> None:
         ):
             desc = f.get("description", "")
             ftype = f["type"][:16]
-            prefix = f"    [{f['severity'].upper():<8}]  {f['target_addr']:<20}  {ftype:<16}  "
-            term_width = shutil.get_terminal_size(fallback=(120, 24)).columns
-            desc_width = max(40, term_width - len(prefix))
-            if len(desc) > desc_width:
-                lines = [desc[i:i + desc_width] for i in range(0, len(desc), desc_width)]
-                print(prefix + ("\n" + " " * len(prefix)).join(lines))
-            else:
-                print(prefix + desc)
+            log.info(
+                f"  [{f['severity'].upper():<8}]  {f['target_addr']:<20}  "
+                f"{ftype:<16}  {desc}"
+            )
 
-    print(f"\n  Database: {config.DB_PATH}")
-    print("=" * 60 + "\n")
+    log.info(f"  Database: {config.DB_PATH}")
+    log.info("=" * 60)
 
 
 if __name__ == "__main__":

@@ -439,22 +439,22 @@ def _protocol_hint(band_mhz: int) -> str:
 # ---------------------------------------------------------------------------
 
 def _print_summary(band_activity: dict, total_packets: int) -> None:
-    print("\n" + "─" * 76)
-    print("  STAGE 17 SUMMARY -- sub-GHz PHY Survey (YardStickOne)")
-    print("─" * 76)
-    print(f"  {'Frequencies swept':<28}: {len(_ALL_FREQS)}")
-    print(f"  {'Bands covered':<28}: 300-348, 391-464, 782-928 MHz")
-    print(f"  {'Active 5 MHz bands':<28}: {len(band_activity)}")
-    print(f"  {'Total packets captured':<28}: {total_packets}")
+    log.info("\n" + "─" * 76)
+    log.info("  STAGE 17 SUMMARY -- sub-GHz PHY Survey (YardStickOne)")
+    log.info("─" * 76)
+    log.info(f"  {'Frequencies swept':<28}: {len(_ALL_FREQS)}")
+    log.info(f"  {'Bands covered':<28}: 300-348, 391-464, 782-928 MHz")
+    log.info(f"  {'Active 5 MHz bands':<28}: {len(band_activity)}")
+    log.info(f"  {'Total packets captured':<28}: {total_packets}")
     if band_activity:
-        print()
-        print("  Active bands:")
+
+        log.info("  Active bands:")
         for band_mhz, info in sorted(band_activity.items()):
             rssi = f"{info['peak_rssi']} dBm" if info["peak_rssi"] else "?"
-            print(
+            log.info(
                 f"    {band_mhz:4d}–{band_mhz + _BAND_STEP_MHZ} MHz  "
                 f"pkts={info['pkt_count']:<5}  RSSI={rssi}"
             )
     else:
-        print("  Result: no sub-GHz RF activity detected on swept frequencies.")
-    print("─" * 76 + "\n")
+        log.info("  Result: no sub-GHz RF activity detected on swept frequencies.")
+    log.info("─" * 76 + "\n")

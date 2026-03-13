@@ -978,19 +978,18 @@ def _print_summary(
     results: list[WriteResult],
     evidence: dict,
 ) -> None:
-    print("\n" + "─" * 76)
-    print("  STAGE 8 SUMMARY -- GATT PoC / Semantic Interaction")
-    print("─" * 76)
+    log.info("─" * 76)
+    log.info("STAGE 8 SUMMARY -- GATT PoC / Semantic Interaction")
+    log.info("─" * 76)
     confirmed_name = evidence.get("confirmed_poc_name")
     display_name   = (
         f"{confirmed_name}  (confirmed via 0x2A00 read-back)"
         if confirmed_name
         else target.name or "(unnamed)"
     )
-    print(f"  {'Target':<18}: {target.bd_address}")
-    print(f"  {'Name':<18}: {display_name}")
-    print()
-    print("  Actions performed:")
+    log.info(f"  {'Target':<18}: {target.bd_address}")
+    log.info(f"  {'Name':<18}: {display_name}")
+    log.info("  Actions performed:")
 
     for action in actions:
         label  = action["label"]
@@ -1004,21 +1003,21 @@ def _print_summary(
                     "  read-back: CONFIRMED" if wr.readback_confirmed
                     else f"  read-back: {'mismatch' if wr.readback else 'unavailable (auth required)'}"
                 )
-                print(f"    [0x2A00  h={handle}]  WRITE OK — '{wr.data.decode('utf-8', errors='replace')}'{rb_note} → restored")
+                log.info(f"    [0x2A00  h={handle}]  WRITE OK — '{wr.data.decode('utf-8', errors='replace')}'{rb_note} -> restored")
             elif wr:
-                print(f"    [0x2A00  h={handle}]  WRITE FAILED — {wr.error}")
+                log.info(f"    [0x2A00  h={handle}]  WRITE FAILED — {wr.error}")
 
         elif label == "alert_level_trigger":
             r_high = next((r for r in results if r.label == "alert_high"), None)
             r_off  = next((r for r in results if r.label == "alert_restore"), None)
             high_s = "OK" if (r_high and r_high.success) else f"FAIL ({r_high.error if r_high else '?'})"
             off_s  = "OK" if (r_off  and r_off.success)  else "FAIL"
-            print(f"    [0x2A06  h={handle}]  High Alert (0x02): {high_s}  →  No Alert (0x00): {off_s}")
+            log.info(f"    [0x2A06  h={handle}]  High Alert (0x02): {high_s}  ->  No Alert (0x00): {off_s}")
 
         elif label == "hr_control_reset":
             r = next((r for r in results if r.label == "hr_reset"), None)
             status = "OK" if (r and r.success) else f"FAIL ({r.error if r else '?'})"
-            print(f"    [0x2A39  h={handle}]  Reset Energy Expended (0x01): {status}")
+            log.info(f"    [0x2A39  h={handle}]  Reset Energy Expended (0x01): {status}")
 
         elif label == "proprietary_probe":
             pr     = [r for r in results if r.label == "probe" and r.handle == handle]
@@ -1026,7 +1025,7 @@ def _print_summary(
             n_ntf  = sum(1 for n in evidence["notifications"] if n.get("probe_handle") == handle)
             pair_s = "  [notify pair]" if action.get("has_notify_pair") else ""
             ntf_s  = f"  [{n_ntf} response(s) captured]" if n_ntf else ""
-            print(
+            log.info(
                 f"    [{uuid[:8]}... h={handle}]  "
                 f"{n_ok}/{len(pr)} probes accepted{pair_s}{ntf_s}"
             )
@@ -1034,40 +1033,39 @@ def _print_summary(
     wc = evidence["write_count"]
     ec = evidence["error_count"]
     nc = len(evidence.get("notifications", []))
-    print(f"\n  Writes accepted        : {wc}")
-    print(f"  Writes rejected        : {ec}")
+    log.info(f"  Writes accepted        : {wc}")
+    log.info(f"  Writes rejected        : {ec}")
     if nc:
-        print(f"  Notify responses       : {nc}")
-        print(f"\n  Notify data:")
+        log.info(f"  Notify responses       : {nc}")
         for n in evidence["notifications"][:8]:
             ts = n.get("ts", "")[-13:-5] if n.get("ts") else "?"
-            print(f"    {ts}  {n.get('uuid', '')[:16]}...  {n.get('value_hex', '')[:32]}")
+            log.info(f"    {ts}  {n.get('uuid', '')[:16]}...  {n.get('value_hex', '')[:32]}")
 
     if evidence.get("baseline_reads"):
-        print(f"\n  Baseline reads ({len(evidence['baseline_reads'])}):")
+        log.info(f"  Baseline reads ({len(evidence['baseline_reads'])}):")
         for h_str, hex_val in list(evidence["baseline_reads"].items())[:6]:
-            print(f"    h={h_str}: {hex_val[:40]}{'…' if len(hex_val) > 40 else ''}")
+            log.info(f"    h={h_str}: {hex_val[:40]}{'...' if len(hex_val) > 40 else ''}")
 
     if wc == 0 and ec == 0:
-        print("\n  [!] No writes executed — connection or profile issue.")
+        log.warning("  [!] No writes executed — connection or profile issue.")
 
     raw_pdu = evidence.get("raw_pdu_probe", [])
     if raw_pdu:
         responded = [r for r in raw_pdu if r.get("response_hex")]
-        print(f"\n  Raw PDU probe ({len(responded)}/{len(raw_pdu)} handles responded):")
+        log.info(f"  Raw PDU probe ({len(responded)}/{len(raw_pdu)} handles responded):")
         for r in raw_pdu:
-            resp = r["response_hex"][:40] + "…" if r.get("response_hex") and len(r["response_hex"]) > 40 else (r.get("response_hex") or "no response")
-            print(f"    h={r['handle']}  {resp}")
+            resp = r["response_hex"][:40] + "..." if r.get("response_hex") and len(r["response_hex"]) > 40 else (r.get("response_hex") or "no response")
+            log.info(f"    h={r['handle']}  {resp}")
 
     post = evidence.get("post_pairing_results", [])
     if post:
         post_ok = [r for r in post if r["success"]]
-        print(
-            f"\n  Post-pairing escalation ({len(post_ok)}/{len(post)} "
+        log.info(
+            f"  Post-pairing escalation ({len(post_ok)}/{len(post)} "
             "auth-gated handles re-tried after LESC Just Works pairing):"
         )
         for r in post:
             status = "ACCEPTED" if r["success"] else f"REJECTED ({r['error']})"
-            print(f"    h={r['handle']} [{r['uuid'][:8]}...]  {status}")
+            log.info(f"    h={r['handle']} [{r['uuid'][:8]}...]  {status}")
 
-    print("─" * 76 + "\n")
+    log.info("─" * 76)

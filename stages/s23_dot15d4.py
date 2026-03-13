@@ -465,34 +465,34 @@ def _print_summary(
     devices: dict[str, dict],
     pan_stats: dict[int, dict],
 ) -> None:
-    print("\n" + "─" * 76)
-    print("  STAGE 23 SUMMARY -- Raw IEEE 802.15.4 Reconnaissance")
-    print("─" * 76)
-    print(f"  {'Channels scanned':<30}: {len(DOT15D4_CHANNELS)} (11-26)")
-    print(f"  {'PANs discovered':<30}: {len(pan_stats)}")
-    print(f"  {'Unique device addresses':<30}: {len(devices)}")
+    log.info("\n" + "─" * 76)
+    log.info("  STAGE 23 SUMMARY -- Raw IEEE 802.15.4 Reconnaissance")
+    log.info("─" * 76)
+    log.info(f"  {'Channels scanned':<30}: {len(DOT15D4_CHANNELS)} (11-26)")
+    log.info(f"  {'PANs discovered':<30}: {len(pan_stats)}")
+    log.info(f"  {'Unique device addresses':<30}: {len(devices)}")
     if pan_stats:
-        print()
-        print("  PANs:")
+
+        log.info("  PANs:")
         for pan_id, info in sorted(pan_stats.items()):
             protocols = sorted(info["protocols"] - {"unknown", "proprietary/unknown"})
             proto_str = ", ".join(protocols) if protocols else "unknown"
-            print(
+            log.info(
                 f"    PAN 0x{pan_id:04X}  ch={info['channel']:<3}  "
                 f"frames={info['frame_count']:<5}  "
                 f"devices={len(info['device_addrs'])}  "
                 f"protocol={proto_str}"
             )
     if devices:
-        print()
-        print("  Devices (first 20):")
+
+        log.info("  Devices (first 20):")
         for addr, info in list(devices.items())[:20]:
             protocols = sorted(info["protocols"] - {"unknown", "proprietary/unknown"})
             proto_str = ", ".join(protocols) if protocols else "unknown"
-            print(
+            log.info(
                 f"    {addr:<24}  "
                 f"ch={info['first_channel']:<3}  "
                 f"frames={info['frame_count']:<4}  "
                 f"protocol={proto_str}"
             )
-    print("─" * 76 + "\n")
+    log.info("─" * 76 + "\n")

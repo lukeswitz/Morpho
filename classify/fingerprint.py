@@ -27,22 +27,24 @@ def classify_device(t: Target) -> str:
     return "unknown"
 
 
-def compute_risk_score(t: Target) -> int:
-    score = 0
+_HIGH_RISK_CLASSES = {"access_control", "medical", "industrial"}
 
+
+def compute_risk_score(t: Target) -> int:
     if t.device_class == "access_control":
-        score += 5
+        score = 5
     elif t.device_class == "medical":
-        score += 4
+        score = 4
     elif t.device_class == "industrial":
-        score += 3
+        score = 3
+    elif t.device_class == "sensor":
+        score = 2
     else:
         score = 1
 
-    if t.connectable:
-        score += 1
-    else:
+    if not t.connectable:
         return score
+    score += 1
 
     if not t.address_type.startswith("random"):
         score += 1
@@ -50,9 +52,13 @@ def compute_risk_score(t: Target) -> int:
     if t.rssi_avg > -50:
         score += 1
 
-    for pattern in config.HIGH_VALUE_PATTERNS:
-        if re.search(pattern, (t.name or "").lower()):
-            score += 3
-            break
+    name_lower = (t.name or "").lower()
+    high_value_hit = any(re.search(p, name_lower) for p in config.HIGH_VALUE_PATTERNS)
+    if high_value_hit:
+        score += 3
+
+    # Unclassified devices without a high-value name hit are noise — cap at LOW
+    if t.device_class not in _HIGH_RISK_CLASSES and not high_value_hit:
+        return min(score, 3)
 
     return min(score, 10)

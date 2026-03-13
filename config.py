@@ -69,6 +69,9 @@ SUBGHZ_SWEEP_SECS    = 120   # total sweep budget
 SUBGHZ_PER_FREQ_SECS = 2     # dwell per frequency step
 SUBGHZ_RECORD_SECS   = 5     # focused PCAP capture per active OOK frequency
 
+# Output redaction — replace MACs and device names in all log/TUI output
+REDACT_OUTPUT: bool = False
+
 # Secondary device interfaces (auto-detected from whadup if not set)
 ESB_INTERFACE: str | None = None         # rfstorm0 if available
 PHY_SUBGHZ_INTERFACE: str | None = None  # yardstickone0 if available
@@ -103,16 +106,41 @@ HIGH_VALUE_PATTERNS = [
 ]
 
 COMPANY_IDS = {
-    0x004C: "Apple",
-    0x0006: "Microsoft",
-    0x0075: "Samsung",
-    0x00E0: "Google",
+    # Chipset / silicon vendors
+    0x0002: "Intel",
+    0x000A: "Qualcomm",
+    0x000F: "Broadcom",
+    0x0025: "Cambridge Silicon Radio",
+    0x005A: "Dialog Semiconductor",
+    0x0101: "MediaTek",
+    0x025F: "NXP Semiconductors",
     0x0059: "Nordic Semiconductor",
-    0x0499: "Ruuvi Innovations",
-    0x0157: "Polar Electro",
-    0x0171: "Amazon",
     0x02E5: "Espressif",
+    # Consumer electronics
+    0x0006: "Microsoft",
+    0x0008: "Motorola",
+    0x004C: "Apple",
+    0x0057: "Harman International",
+    0x0075: "Samsung",
+    0x0087: "Garmin",
+    0x00CD: "Logitech",
+    0x00E0: "Google",
+    0x0131: "Parrot",
+    0x0145: "Plantronics",
+    0x015F: "Sony",
+    0x0171: "Amazon",
+    0x01A4: "Bose",
+    0x0310: "Fitbit",
+    0x0636: "Xiaomi",
+    0x0822: "Anker",
+    0x05A7: "Sonos",
+    # Networking / enterprise
     0x08D0: "Cisco",
+    # Health / fitness
+    0x0157: "Polar Electro",
+    0x0217: "Withings",
+    0x0231: "Tile",
+    0x0499: "Ruuvi Innovations",
 }
 
 SERVICE_UUID_MAP = {

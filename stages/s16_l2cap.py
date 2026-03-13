@@ -21,7 +21,7 @@ import time
 from core.dongle import WhadDongle
 from core.models import Finding
 from core.db import insert_finding
-from core.logger import get_logger
+from core.logger import get_logger, prompt_line
 import config
 
 log = get_logger("s16_l2cap")
@@ -175,20 +175,20 @@ def _print_summary(
     open_psms: list[int],
     fuzz_results: list[dict],
 ) -> None:
-    print("\n" + "─" * 76)
-    print("  STAGE 16 SUMMARY -- L2CAP CoC Security Test")
-    print("─" * 76)
-    print(f"  {'Target':<22}: {target_addr}")
-    print(f"  {'PSMs probed':<22}: {len(_PROBE_PSMS)}")
-    print(f"  {'Open PSMs':<22}: {len(open_psms)}")
+    log.info("\n" + "─" * 76)
+    log.info("  STAGE 16 SUMMARY -- L2CAP CoC Security Test")
+    log.info("─" * 76)
+    log.info(f"  {'Target':<22}: {target_addr}")
+    log.info(f"  {'PSMs probed':<22}: {len(_PROBE_PSMS)}")
+    log.info(f"  {'Open PSMs':<22}: {len(open_psms)}")
     if open_psms:
         for psm in open_psms:
             fr = next((r for r in fuzz_results if r["psm"] == psm), {})
             crash = "  *** CRASH ***" if fr.get("crash_suspected") else ""
-            print(f"    PSM 0x{psm:04X}  sdus={fr.get('sdus_sent',0)}  errors={fr.get('errors',0)}{crash}")
+            log.info(f"    PSM 0x{psm:04X}  sdus={fr.get('sdus_sent',0)}  errors={fr.get('errors',0)}{crash}")
     else:
-        print("  Result: all PSMs rejected — no open CoC channels.")
-    print("─" * 76 + "\n")
+        log.info("  Result: all PSMs rejected — no open CoC channels.")
+    log.info("─" * 76 + "\n")
 
 
 def _l2cap_available() -> bool:
@@ -201,10 +201,10 @@ def _l2cap_available() -> bool:
 
 
 def _prompt_target() -> str | None:
-    print("\n  Stage 16 — L2CAP CoC Test")
-    print("  BD address of target (uses hci0, not WHAD dongle):")
+    log.info("\n  Stage 16 — L2CAP CoC Test")
+    log.info("  BD address of target (uses hci0, not WHAD dongle):")
     try:
-        raw = input("  Address [empty to skip]: ").strip()
+        raw = prompt_line("  Address [empty to skip]: ").strip()
     except (EOFError, KeyboardInterrupt):
         return None
     return raw.upper() if raw else None
@@ -212,7 +212,7 @@ def _prompt_target() -> str | None:
 
 def _prompt_addr_type() -> str:
     try:
-        c = input("  Address type [P]ublic / [R]andom [P]: ").strip().upper()
+        c = prompt_line("  Address type [P]ublic / [R]andom [P]: ").strip().upper()
     except (EOFError, KeyboardInterrupt):
         return "public"
     return "random" if c == "R" else "public"

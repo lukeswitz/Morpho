@@ -362,7 +362,7 @@ class WhadDongle:
             from whad.zigbee import Sniffer as _ZigbeeSniffer  # noqa: F401
             caps.can_zigbee = True
             log.debug("Cap probe: ZigBee OK")
-        except ImportError as exc:
+        except Exception as exc:
             log.warning(f"Cap probe: ZigBee not available ({exc})")
 
         # --- Probe 12: send_pdu availability (raw ATT PDU injection from Central) ---
@@ -606,7 +606,7 @@ class WhadDongle:
 
     def _whad_log(self, msg: str) -> None:
         if self._verbose:
-            print(f"[WHAD] {msg}")
+            log.debug(f"[WHAD] {msg}")
 
 
 # ---------------------------------------------------------------------------

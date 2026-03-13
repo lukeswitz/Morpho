@@ -258,6 +258,7 @@ def _upsert_discovered_device(
     targets: dict,
     engagement_id: str,
     now,
+    target_callback=None,
 ) -> None:
     """Merge a discover_devices() device object into the shared targets dict.
 
@@ -311,7 +312,8 @@ def _upsert_discovered_device(
             _, mfr_name = decode_manufacturer(
                 info["manufacturer_bytes"] or b"\x00\x00"
             )
-            t.manufacturer = mfr_name
+            if mfr_name:  # only override OUI when company ID actually resolved
+                t.manufacturer = mfr_name
 
         t.device_class = classify_device(t)
         t.risk_score = compute_risk_score(t)
@@ -332,6 +334,8 @@ def _upsert_discovered_device(
                 t.services.append(svc)
 
     upsert_target(targets[bd_addr])
+    if target_callback is not None:
+        target_callback(targets[bd_addr])
 
 
 def _run_discover_devices(
@@ -340,6 +344,7 @@ def _run_discover_devices(
     targets: dict,
     lock: threading.Lock,
     engagement_id: str,
+    target_callback=None,
 ) -> bool:
     """Attempt to scan using scanner.discover_devices().
 
@@ -371,7 +376,7 @@ def _run_discover_devices(
         for dev in gen:
             now = datetime.now(timezone.utc)
             with lock:
-                _upsert_discovered_device(dev, targets, engagement_id, now)
+                _upsert_discovered_device(dev, targets, engagement_id, now, target_callback)
     except KeyboardInterrupt:
         log.info("Scan interrupted by user.")
     except Exception as exc:
@@ -385,6 +390,7 @@ def run(
     dongle: WhadDongle,
     engagement_id: str,
     ubertooth_dongle: "WhadDongle | None" = None,
+    target_callback=None,
 ) -> list[Target]:
     targets: dict[str, Target] = {}
     _lock = threading.Lock()  # protects `targets` dict for parallel writes
@@ -425,7 +431,8 @@ def run(
     if ubertooth_dongle is not None and ubertooth_dongle.caps.can_scan:
         _ubertooth_thread = threading.Thread(
             target=_ubertooth_scan_worker,
-            args=(ubertooth_dongle, targets, _lock, engagement_id, config.SCAN_DURATION),
+            args=(ubertooth_dongle, targets, _lock, engagement_id, config.SCAN_DURATION,
+                  target_callback),
             daemon=True,
         )
         _ubertooth_thread.start()
@@ -434,7 +441,7 @@ def run(
     _used_discover = False
     try:
         _used_discover = _run_discover_devices(
-            scanner, dongle, targets, _lock, engagement_id
+            scanner, dongle, targets, _lock, engagement_id, target_callback
         )
     except Exception as exc:
         log.debug(f"[S1] discover_devices() outer error: {exc} — using raw loop")
@@ -521,7 +528,8 @@ def run(
                                 _, mfr_name = decode_manufacturer(
                                     ad["manufacturer_data"] or b"\x00\x00"
                                 )
-                                t.manufacturer = mfr_name
+                                if mfr_name:
+                                    t.manufacturer = mfr_name
 
                             t.device_class = classify_device(t)
                             t.risk_score = compute_risk_score(t)
@@ -549,6 +557,8 @@ def run(
                                     t.services.append(svc)
 
                         upsert_target(targets[bd_addr])
+                        if target_callback is not None:
+                            target_callback(targets[bd_addr])
 
                 except Exception as exc:
                     log.debug(f"Packet parse error: {exc}")
@@ -580,6 +590,7 @@ def _ubertooth_scan_worker(
     lock: threading.Lock,
     engagement_id: str,
     duration: float,
+    target_callback=None,
 ) -> None:
     """Background thread: scan with Ubertooth One and merge into shared targets."""
     try:
@@ -627,11 +638,23 @@ def _ubertooth_scan_worker(
                             engagement_id=engagement_id,
                             channel=_extract_channel(pkt),
                         )
+                        if _addr_type_label(pkt, bd_addr) == "public":
+                            oui_name = oui_lookup(bd_addr)
+                            if oui_name:
+                                t.manufacturer = oui_name
+                        if ad["company_id"] is not None:
+                            _, mfr_name = decode_manufacturer(
+                                ad["manufacturer_data"] or b"\x00\x00"
+                            )
+                            if mfr_name:
+                                t.manufacturer = mfr_name
                         from classify.fingerprint import classify_device, compute_risk_score
                         t.device_class = classify_device(t)
                         t.risk_score = compute_risk_score(t)
                         targets[bd_addr] = t
                         log.info(f"[S1][ubertooth] New device: {bd_addr} ({t.device_class})")
+                        if target_callback is not None:
+                            target_callback(t)
             except Exception as exc:
                 log.debug(f"[S1][ubertooth] Packet error: {exc}")
     except Exception as exc:
@@ -645,13 +668,14 @@ def _ubertooth_scan_worker(
 
 def _log_new_target(t: Target) -> None:
     risk_tag = _risk_label(t.risk_score)
+    rssi_val = t.rssi_samples[-1] if t.rssi_samples else 0
     log.info(
         f"[{risk_tag}] {t.bd_address}  "
         f"{t.address_type:<22}  "
-        f"{t.adv_type:<14}  "
+        f"{t.adv_type:<16}  "
         f"conn={t.connectable}  "
         f"ch={t.channel:<2}  "
-        f"rssi={t.rssi_samples[-1]:>4} dBm  "
+        f"rssi={rssi_val:>4} dBm  "
         f"name={t.name or '—'}"
     )
     if t.services:
@@ -696,50 +720,20 @@ def _risk_label(score: int) -> str:
 
 
 def _print_summary(targets: list[Target]) -> None:
-    print("\033[2J\033[H", end="")
-    
-    print("\n" + "─" * 130)
-    print(f"  STAGE 1 SUMMARY -- {len(targets)} devices discovered")
-    print("─" * 130)
-    print(
-        f"  {'RISK':<6} {'BD ADDRESS':<20} {'TYPE':<14} "
-        f"{'PDU':<16} {'CONN':<5} {'CH':<4} {'RSSI':>5}  {'NAME':<24} MANUFACTURER"
-    )
-    print("─" * 130)
-    for t in targets:
-        print(
-            f"  {_risk_label(t.risk_score):<6} "
-            f"{t.bd_address:<20} "
-            f"{_addr_type_short(t.address_type):<14} "
-            f"{t.adv_type:<16} "
-            f"{'yes' if t.connectable else 'no':<5} "
-            f"{t.channel:<4} "
-            f"{t.rssi_avg:>5.0f}  "
-            f"{_trunc(t.name, 24):<24} "
-            f"{_trunc(t.manufacturer, 22)}"
-        )
-    print("─" * 130)
+    log.info(f"S1 complete: {len(targets)} devices discovered")
 
     by_class: dict[str, list[Target]] = {}
     for t in targets:
         by_class.setdefault(t.device_class, []).append(t)
-
-    print("\n  Device class breakdown:")
-    for cls, items in sorted(
-        by_class.items(), key=lambda x: -len(x[1])
-    ):
+    for cls, items in sorted(by_class.items(), key=lambda x: -len(x[1])):
         connectable_count = sum(1 for t in items if t.connectable)
-        print(
-            f"    {cls:<16} {len(items):>3} total  "
-            f"{connectable_count:>3} connectable"
-        )
+        log.info(f"  {cls:<16} {len(items):>3} total  {connectable_count:>3} connectable")
 
     high_risk = [t for t in targets if t.risk_score >= 6]
     if high_risk:
-        print(f"\n  HIGH/CRITICAL targets ({len(high_risk)}):")
+        log.warning(f"HIGH/CRITICAL targets: {len(high_risk)}")
         for t in high_risk:
-            print(
-                f"    {t.bd_address}  score={t.risk_score}  "
+            log.warning(
+                f"  {t.bd_address}  score={t.risk_score}  "
                 f"{t.name or '(unnamed)'}  {t.device_class}"
             )
-    print()

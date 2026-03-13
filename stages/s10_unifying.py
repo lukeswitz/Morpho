@@ -32,7 +32,7 @@ from whad.device import WhadDevice
 from core.dongle import WhadDongle
 from core.models import Finding
 from core.db import insert_finding
-from core.logger import get_logger
+from core.logger import get_logger, prompt_line
 import config
 
 log = get_logger("s10_unifying")
@@ -416,7 +416,7 @@ def _run_ducky_mode(dongle: WhadDongle, engagement_id: str, interface: str) -> N
     if not script_path:
         # Prompt operator for script path
         try:
-            script_path = input(
+            script_path = prompt_line(
                 "  DuckyScript file path (absolute): "
             ).strip()
         except (KeyboardInterrupt, EOFError):
@@ -1142,25 +1142,25 @@ def _flatten_dict(obj: object, prefix: str = "") -> dict:
 
 def _prompt_target_address(seen: dict[str, str]) -> Optional[str]:
     """Show discovered devices and prompt operator to select injection target."""
-    print()
+
     if seen:
-        print("  Discovered Unifying devices:")
+        log.info("  Discovered Unifying devices:")
         addr_list = list(seen.items())
         for i, (addr, dtype) in enumerate(addr_list, 1):
-            print(f"    [{i}]  {addr}  ({dtype})")
-        print()
-        print("  Enter number to select, or type ESB address manually.")
-        print("  Leave empty to abort.")
+            log.info(f"    [{i}]  {addr}  ({dtype})")
+
+        log.info("  Enter number to select, or type ESB address manually.")
+        log.info("  Leave empty to abort.")
     else:
-        print("  No Unifying devices found in scan window.")
-        print(
+        log.info("  No Unifying devices found in scan window.")
+        log.info(
             "  Enter ESB address manually (e.g. 29:b9:81:2c:a4) "
             "or leave empty to abort."
         )
-    print()
+
 
     try:
-        raw = input("  Target [number/address/enter to abort]: ").strip()
+        raw = prompt_line("  Target [number/address/enter to abort]: ").strip()
     except (KeyboardInterrupt, EOFError):
         return None
 
@@ -1172,7 +1172,7 @@ def _prompt_target_address(seen: dict[str, str]) -> Optional[str]:
         addr_list = list(seen.items())
         if 0 <= idx < len(addr_list):
             return addr_list[idx][0]
-        print("  Invalid selection.")
+        log.info("  Invalid selection.")
         return None
 
     return raw.lower()
@@ -1180,20 +1180,20 @@ def _prompt_target_address(seen: dict[str, str]) -> Optional[str]:
 
 def _ask_mouse_dup_mode() -> bool:
     """Ask operator whether to use mouse duplication (-d) or scripted inject."""
-    print()
-    print("  Mouse mode:")
-    print("    [S]  Scripted  — inject fixed move (50,50) + no buttons")
-    print("    [D]  Dup relay — relay physical host mouse to target (wuni-mouse -d)")
+
+    log.info("  Mouse mode:")
+    log.info("    [S]  Scripted  — inject fixed move (50,50) + no buttons")
+    log.info("    [D]  Dup relay — relay physical host mouse to target (wuni-mouse -d)")
     while True:
         try:
-            c = input("  Select [S/D]: ").strip().upper()
+            c = prompt_line("  Select [S/D]: ").strip().upper()
         except (KeyboardInterrupt, EOFError):
             return False
         if c in ("S", ""):
             return False
         if c == "D":
             return True
-        print("  Please enter S or D.")
+        log.info("  Please enter S or D.")
 
 
 def _record_inject_finding(
@@ -1274,13 +1274,13 @@ def _print_summary(
     }
     mode_label = mode_labels.get(mode, mode)
     result = "SUCCESS" if injected else ("N/A" if mode == "sniff" else "FAILED/IMMUNE")
-    print("\n" + "─" * 76)
-    print(f"  STAGE 10 SUMMARY -- Logitech Unifying / {mode_label}")
-    print("─" * 76)
-    print(f"  {'Mode':<22}: {mode_label}")
-    print(f"  {'Devices discovered':<22}: {discovered}")
+    log.info("\n" + "─" * 76)
+    log.info(f"  STAGE 10 SUMMARY -- Logitech Unifying / {mode_label}")
+    log.info("─" * 76)
+    log.info(f"  {'Mode':<22}: {mode_label}")
+    log.info(f"  {'Devices discovered':<22}: {discovered}")
     if mode != "sniff":
-        print(f"  {'Injection result':<22}: {result}")
+        log.info(f"  {'Injection result':<22}: {result}")
         if method:
-            print(f"  {'Method':<22}: {method}")
-    print("─" * 76 + "\n")
+            log.info(f"  {'Method':<22}: {method}")
+    log.info("─" * 76 + "\n")

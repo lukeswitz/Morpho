@@ -31,7 +31,7 @@ from whad.device import WhadDevice
 from core.dongle import WhadDongle
 from core.models import Target, Finding, GattCharacteristic
 from core.db import insert_finding
-from core.logger import get_logger
+from core.logger import get_logger, prompt_line, shell_write, push_shell, pop_shell
 from core.pcap import pcap_path, attach_monitor, detach_monitor
 import config
 
@@ -1131,6 +1131,7 @@ def shell(
         if isinstance(c.get("value_handle"), int) and c["value_handle"] > 0
     }
 
+    push_shell(addr)
     _shell_banner(addr, profile, by_handle)
 
     central = dongle.central()
@@ -1139,10 +1140,12 @@ def shell(
         log.info(f"[shell] Connecting to {addr} …")
         periph_dev = central.connect(addr, random=is_random, timeout=CONNECT_TIMEOUT)
     except Exception as exc:
-        print(f"  [shell] Connection failed: {type(exc).__name__}: {exc}")
+        shell_write(f"  [shell] Connection failed: {type(exc).__name__}: {exc}")
+        pop_shell()
         return
     if periph_dev is None:
-        print(f"  [shell] Could not connect to {addr} (timeout).")
+        shell_write(f"  [shell] Could not connect to {addr} (timeout).")
+        pop_shell()
         return
 
     try:
@@ -1152,7 +1155,7 @@ def shell(
     except Exception as exc:
         log.debug(f"[S5] central.version() failed: {exc}")
 
-    print(f"  Connected. Type 'help' for commands.\n")
+    shell_write(f"  [OK] Connected to {addr}  —  type 'help' for commands")
 
     subscribed: dict[int, object] = {}
     notif_buffer: list[dict] = []
@@ -1169,8 +1172,7 @@ def shell(
             with notif_lock:
                 notif_buffer.append({"handle": h, "hex": hex_val, "text": text_val})
             label = by_handle.get(h, {}).get("uuid_name") or f"h={h}"
-            print(f"\r  [notify] {label}: {text_val or hex_val}")
-            print("  gatt> ", end="", flush=True)
+            shell_write(f"  [notify] {label}: {text_val or hex_val}")
         return _cb
 
     try:
@@ -1181,9 +1183,8 @@ def shell(
 
     while True:
         try:
-            raw = input("  gatt> ").strip()
+            raw = prompt_line("  gatt> ").strip()
         except (EOFError, KeyboardInterrupt):
-            print()
             break
         if not raw:
             continue
@@ -1199,21 +1200,18 @@ def shell(
             break
 
         elif cmd == "help":
-            print(
-                "\n  Commands:\n"
-                "    read   <h>               — read value (hex + text)\n"
-                "    write  <h> <hex>         — write with response\n"
-                "    wnr    <h> <hex>         — write without response\n"
-                "    sub    <h>               — subscribe notifications\n"
-                "    unsub  <h>               — unsubscribe\n"
-                "    notify                   — show buffered notifications\n"
-                "    info   [h]               — profile table (or single char)\n"
-                "    connupdate <ms> [lat] [to_ms] — request LL connection param update\n"
-                "    whack                    — oscillate params to stress timing\n"
-                "    pyshell                  — drop to Python REPL (periph, profile, central)\n"
-                "    help                     — this message\n"
-                "    quit / exit              — disconnect and return\n"
-            )
+            shell_write("  Commands:")
+            shell_write("    read   <h>               — read value (hex + text)")
+            shell_write("    write  <h> <hex>         — write with response")
+            shell_write("    wnr    <h> <hex>         — write without response")
+            shell_write("    sub    <h>               — subscribe notifications")
+            shell_write("    unsub  <h>               — unsubscribe")
+            shell_write("    notify                   — show buffered notifications")
+            shell_write("    info   [h]               — profile table (or single char)")
+            shell_write("    connupdate <ms> [lat] [to_ms] — request LL conn param update")
+            shell_write("    whack                    — oscillate params to stress timing")
+            shell_write("    help                     — this message")
+            shell_write("    quit / exit              — disconnect and return")
 
         elif cmd == "info":
             if len(parts) > 1:
@@ -1221,25 +1219,25 @@ def shell(
                     h = int(parts[1], 0)
                     c = by_handle.get(h)
                     if c:
-                        print(f"  h={h}: uuid={c['uuid']}  name={c.get('uuid_name','')}  "
-                              f"props={c.get('properties',[])}  "
-                              f"auth={c.get('requires_auth', '?')}")
+                        shell_write(f"  h={h}: uuid={c['uuid']}  name={c.get('uuid_name','')}  "
+                                    f"props={c.get('properties',[])}  "
+                                    f"auth={c.get('requires_auth', '?')}")
                     else:
-                        print(f"  Unknown handle {h}")
+                        shell_write(f"  Unknown handle {h}")
                 except ValueError:
-                    print("  Usage: info [handle]")
+                    shell_write("  Usage: info [handle]")
             else:
                 _print_profile_table(profile, by_handle)
 
         elif cmd == "read":
             if len(parts) < 2:
-                print("  Usage: read <handle>")
+                shell_write("  Usage: read <handle>")
                 continue
             try:
                 h = int(parts[1], 0)
                 raw_val = periph_dev.read(h)
                 if raw_val is None:
-                    print(f"  h={h}: (empty response)")
+                    shell_write(f"  h={h}: (empty response)")
                 else:
                     hex_s = raw_val.hex() if isinstance(raw_val, bytes) else str(raw_val)
                     text_s = _sanitize_string(
@@ -1249,43 +1247,41 @@ def shell(
                     )
                     name = by_handle.get(h, {}).get("uuid_name") or ""
                     label = f" ({name})" if name else ""
-                    print(f"  h={h}{label}:")
-                    print(f"    hex  : {hex_s}")
-                    print(f"    text : {text_s or '(binary)'}")
+                    shell_write(f"  [OK] h={h}{label}  hex={hex_s}  text={text_s or '(binary)'}")
             except Exception as exc:
-                print(f"  read h={parts[1]} → {type(exc).__name__}: {exc}")
+                shell_write(f"  [ERR] read h={parts[1]} — {type(exc).__name__}: {exc}")
 
         elif cmd == "write":
             if len(parts) < 3:
-                print("  Usage: write <handle> <hex_bytes>")
+                shell_write("  Usage: write <handle> <hex_bytes>")
                 continue
             try:
                 h = int(parts[1], 0)
                 data = bytes.fromhex(parts[2])
                 periph_dev.write(h, data)
-                print(f"  write h={h}: OK ({len(data)} byte(s) with response)")
+                shell_write(f"  [OK] write h={h}  {len(data)} byte(s) written with response")
             except ValueError as exc:
-                print(f"  Bad hex: {exc}")
+                shell_write(f"  [ERR] bad hex — {exc}")
             except Exception as exc:
-                print(f"  write h={parts[1]} → {type(exc).__name__}: {exc}")
+                shell_write(f"  [ERR] write h={parts[1]} — {type(exc).__name__}: {exc}")
 
         elif cmd == "wnr":
             if len(parts) < 3:
-                print("  Usage: wnr <handle> <hex_bytes>")
+                shell_write("  Usage: wnr <handle> <hex_bytes>")
                 continue
             try:
                 h = int(parts[1], 0)
                 data = bytes.fromhex(parts[2])
                 periph_dev.write_command(h, data)
-                print(f"  wnr h={h}: OK ({len(data)} byte(s) no-response)")
+                shell_write(f"  [OK] wnr h={h}  {len(data)} byte(s) written no-response")
             except ValueError as exc:
-                print(f"  Bad hex: {exc}")
+                shell_write(f"  [ERR] bad hex — {exc}")
             except Exception as exc:
-                print(f"  wnr h={parts[1]} → {type(exc).__name__}: {exc}")
+                shell_write(f"  [ERR] wnr h={parts[1]} — {type(exc).__name__}: {exc}")
 
         elif cmd == "sub":
             if len(parts) < 2:
-                print("  Usage: sub <handle>")
+                shell_write("  Usage: sub <handle>")
                 continue
             try:
                 h = int(parts[1], 0)
@@ -1297,50 +1293,46 @@ def shell(
                     if char_obj is None:
                         char_obj = periph_dev.char(uuid_s)
                 if char_obj is None:
-                    print(f"  Cannot resolve char for h={h} (UUID={uuid_s!r}); "
-                          "try discovering first.")
+                    shell_write(f"  [ERR] cannot resolve char h={h} (UUID={uuid_s!r})")
                     continue
                 char_obj.subscribe(notification=True, callback=_make_notif_cb(h))
                 subscribed[h] = char_obj
                 name = c_info.get("uuid_name") or uuid_s
-                print(f"  Subscribed to h={h} ({name})")
+                shell_write(f"  [OK] subscribed h={h} ({name})")
             except Exception as exc:
-                print(f"  sub h={parts[1]} → {type(exc).__name__}: {exc}")
+                shell_write(f"  [ERR] sub h={parts[1]} — {type(exc).__name__}: {exc}")
 
         elif cmd == "unsub":
             if len(parts) < 2:
-                print("  Usage: unsub <handle>")
+                shell_write("  Usage: unsub <handle>")
                 continue
             try:
                 h = int(parts[1], 0)
                 char_obj = subscribed.pop(h, None)
                 if char_obj:
                     char_obj.unsubscribe()
-                    print(f"  Unsubscribed from h={h}")
+                    shell_write(f"  [OK] unsubscribed h={h}")
                 else:
-                    print(f"  h={h} not currently subscribed")
+                    shell_write(f"  h={h} not currently subscribed")
             except Exception as exc:
-                print(f"  unsub → {type(exc).__name__}: {exc}")
+                shell_write(f"  [ERR] unsub — {type(exc).__name__}: {exc}")
 
         elif cmd == "notify":
             with notif_lock:
                 buf = list(notif_buffer)
             if not buf:
-                print("  No notifications buffered yet. Use 'sub <handle>' first.")
+                shell_write("  No notifications buffered yet. Use 'sub <handle>' first.")
             else:
                 for entry in buf:
                     label = by_handle.get(entry["handle"], {}).get("uuid_name") or \
                         f"h={entry['handle']}"
-                    print(f"  [{label}]  hex={entry['hex']}  "
-                          f"text={entry.get('text') or '(binary)'}")
+                    shell_write(f"  [{label}]  hex={entry['hex']}  "
+                                f"text={entry.get('text') or '(binary)'}")
 
         elif cmd == "connupdate":
-            # LL Connection Parameter Update — change interval/latency/timeout
-            # to stress-test timing or disrupt the connection.
             if len(parts) < 2:
-                print("  Usage: connupdate <interval_ms> [latency] [timeout_ms]")
-                print("  Example: connupdate 7.5     (min allowed by BT spec)")
-                print("           connupdate 4000 0 8000  (slow interval, long timeout)")
+                shell_write("  Usage: connupdate <interval_ms> [latency] [timeout_ms]")
+                shell_write("  Example: connupdate 7.5  /  connupdate 4000 0 8000")
                 continue
             try:
                 interval_ms  = float(parts[1])
@@ -1348,7 +1340,6 @@ def shell(
                 timeout_ms   = int(parts[3]) if len(parts) > 3 else max(1000, int(interval_ms * 10))
                 interval_u   = int(interval_ms / 1.25)
                 timeout_u    = int(timeout_ms / 10)
-                # Try WHAD Central API (method name varies by version)
                 updated = False
                 for method_name in (
                     "update_connection_parameters",
@@ -1362,70 +1353,67 @@ def shell(
                     try:
                         fn(interval_u, interval_u, latency, timeout_u)
                         updated = True
-                        print(
-                            f"  connupdate: requested {interval_ms}ms interval  "
+                        shell_write(
+                            f"  [OK] connupdate — interval={interval_ms}ms  "
                             f"latency={latency}  timeout={timeout_ms}ms"
                         )
                         break
                     except Exception as exc:
                         log.debug(f"  {method_name}() failed: {exc}")
                 if not updated:
-                    print(
-                        "  connupdate: WHAD Central has no connection update method. "
-                        "Try 'pyshell' and call central.update_connection_parameters() directly."
-                    )
+                    shell_write("  [ERR] connupdate: no connection update method in WHAD Central")
             except (ValueError, IndexError) as exc:
-                print(f"  connupdate: bad args — {exc}")
+                shell_write(f"  [ERR] connupdate: bad args — {exc}")
 
         elif cmd == "whack":
-            # Rapid connection parameter toggle — oscillate interval to stress device timing.
-            # Useful to test if device handles parameter updates without disconnecting.
-            print(
-                "  whack: sending rapid connection parameter oscillation "
-                "(min→max→min, 5 rounds) ..."
-            )
+            shell_write("  whack: oscillating connection parameters (5 rounds) ...")
             whack_fn = None
             for mname in ("update_connection_parameters", "set_connection_parameters"):
                 if getattr(central, mname, None):
                     whack_fn = getattr(central, mname)
                     break
             if whack_fn is None:
-                print("  whack: no connection update method available.")
+                shell_write("  [ERR] whack: no connection update method available.")
             else:
                 import time as _whack_time
                 for i in range(5):
                     try:
-                        whack_fn(6, 6, 0, 200)       # 7.5ms, very fast
+                        whack_fn(6, 6, 0, 200)
                         _whack_time.sleep(0.3)
-                        whack_fn(3200, 3200, 0, 6400) # 4000ms, very slow
+                        whack_fn(3200, 3200, 0, 6400)
                         _whack_time.sleep(0.3)
-                        print(f"  whack round {i+1}/5 — device still connected ✓")
+                        shell_write(f"  [OK] whack round {i + 1}/5 — device still connected")
                     except Exception as exc:
-                        print(f"  whack round {i+1}/5 — connection lost or error: {exc}")
+                        shell_write(f"  [ERR] whack round {i + 1}/5 — {exc}")
                         break
 
         elif cmd == "pyshell":
-            print(
-                "\n  Dropping into Python REPL.\n"
-                "  Locals: periph (connected device), profile (list[dict]), by_handle (dict).\n"
-                "  Type Ctrl-D or exit() to return to gatt shell.\n"
-            )
-            try:
-                _code.interact(
-                    banner="",
-                    local={
-                        "periph": periph_dev,
-                        "profile": profile,
-                        "by_handle": by_handle,
-                        "central": central,
-                    },
-                    exitmsg="  Returned to gatt shell.",
+            from core.logger import _bridge as _tui_bridge  # type: ignore[attr-defined]
+            if _tui_bridge is not None:
+                shell_write("  [WARN] pyshell unavailable in TUI mode (stdin captured by Textual)")
+                shell_write("         Run with --plain for a full Python REPL.")
+            else:
+                shell_write(
+                    "\n  Dropping into Python REPL.\n"
+                    "  Locals: periph, profile, by_handle, central\n"
+                    "  Ctrl-D or exit() to return.\n"
                 )
-            except SystemExit:
-                pass
+                try:
+                    _code.interact(
+                        banner="",
+                        local={
+                            "periph": periph_dev,
+                            "profile": profile,
+                            "by_handle": by_handle,
+                            "central": central,
+                        },
+                        exitmsg="  Returned to gatt shell.",
+                    )
+                except SystemExit:
+                    pass
 
         else:
-            print(f"  Unknown command: {cmd!r}  (type 'help')")
+            shell_write(f"  Unknown command: {cmd!r}  (type 'help')")
 
     # --- Cleanup ---
     for char_obj in subscribed.values():
@@ -1439,22 +1427,22 @@ def shell(
     except Exception:
         pass
     log.info(f"[shell] Disconnected from {addr}.")
-    print(f"\n  [shell] Session closed — {addr}\n")
+    shell_write(f"  Session closed — {addr}")
+    pop_shell()
 
 
 def _shell_banner(addr: str, profile: list[dict], by_handle: dict[int, dict]) -> None:
-    print("\n" + "═" * 76)
-    print("  GATT INTERACTIVE SHELL")
-    print(f"  Target : {addr}")
-    print("  Commands: read  write  wnr  sub  unsub  notify  info  connupdate  whack  pyshell  help  quit")
-    print("═" * 76)
+    shell_write("═" * 76)
+    shell_write(f"  TARGET  {addr}")
+    shell_write(f"  PROFILE {len(profile)} characteristic(s) loaded")
+    shell_write("  read  write  wnr  sub  unsub  notify  info  connupdate  whack  help  quit")
+    shell_write("═" * 76)
     _print_profile_table(profile, by_handle)
-    print()
 
 
 def _print_profile_table(profile: list[dict], by_handle: dict[int, dict]) -> None:
-    print(f"\n  {'H':>4}  {'UUID':<38}  {'NAME':<22}  PROPS")
-    print("  " + "─" * 72)
+    shell_write(f"  {'H':>4}  {'UUID':<38}  {'NAME':<22}  PROPS")
+    shell_write("  " + "─" * 72)
     for c in sorted(profile, key=lambda x: x.get("value_handle", 0)):
         h = c.get("value_handle", 0)
         uuid_s = (c.get("uuid") or "")[:38]
@@ -1464,7 +1452,7 @@ def _print_profile_table(profile: list[dict], by_handle: dict[int, dict]) -> Non
         if val and len(val) > 18:
             val = val[:17] + "…"
         val_col = f"  [{val}]" if val else ""
-        print(f"  {h:>4}  {uuid_s:<38}  {name:<22}  {props}{val_col}")
+        shell_write(f"  {h:>4}  {uuid_s:<38}  {name:<22}  {props}{val_col}")
 
 
 def _print_summary(
@@ -1476,27 +1464,27 @@ def _print_summary(
     device_info: dict[str, str],
     notifications: list[dict] | None = None,
 ) -> None:
-    print("\n" + "─" * 76)
-    print("  STAGE 5 SUMMARY -- GATT Enumeration")
-    print("─" * 76)
-    print(f"  {'Target':<18}: {addr}")
-    print(f"  {'Name':<18}: {target.name or '(unnamed)'}")
-    print(f"  {'Manufacturer':<18}: {target.manufacturer or '—'}")
-    print(f"  {'Device class':<18}: {target.device_class}")
-    print(f"  {'Total chars':<18}: {len(chars)}")
-    print(f"  {'Unauth readable':<18}: {len(readable)}")
-    print(f"  {'Unauth writable':<18}: {len(writable)}")
+    log.info("─" * 76)
+    log.info("  STAGE 5 SUMMARY -- GATT Enumeration")
+    log.info("─" * 76)
+    log.info(f"  {'Target':<18}: {addr}")
+    log.info(f"  {'Name':<18}: {target.name or '(unnamed)'}")
+    log.info(f"  {'Manufacturer':<18}: {target.manufacturer or '—'}")
+    log.info(f"  {'Device class':<18}: {target.device_class}")
+    log.info(f"  {'Total chars':<18}: {len(chars)}")
+    log.info(f"  {'Unauth readable':<18}: {len(readable)}")
+    log.info(f"  {'Unauth writable':<18}: {len(writable)}")
 
     if device_info:
-        print("\n  Device Information:")
+        log.info("  Device Information:")
         for k, v in device_info.items():
             v_str = str(v)
             if len(v_str) > 44:
                 v_str = v_str[:43] + "…"
-            print(f"    {k:<20}: {v_str}")
+            log.info(f"    {k:<20}: {v_str}")
 
     if readable:
-        print(f"\n  Readable without authentication ({len(readable)}):")
+        log.info(f"  Readable without authentication ({len(readable)}):")
         for c in readable[:20]:
             label = _uuid_label(c.uuid)[:30]
             val = c.value_text or (
@@ -1506,17 +1494,17 @@ def _print_summary(
             )
             if len(val) > 32:
                 val = val[:31] + "…"
-            print(f"    h={c.value_handle:<4}  {label:<30}  {val}")
+            log.info(f"    h={c.value_handle:<4}  {label:<30}  {val}")
         if len(readable) > 20:
-            print(f"    … and {len(readable) - 20} more")
+            log.info(f"    … and {len(readable) - 20} more")
 
     if writable:
-        print(f"\n  Writable without authentication ({len(writable)}):")
+        log.info(f"  Writable without authentication ({len(writable)}):")
         for c in writable[:20]:
-            print(f"    h={c.value_handle:<4}  {_uuid_label(c.uuid)}")
+            log.info(f"    h={c.value_handle:<4}  {_uuid_label(c.uuid)}")
 
     if notifications:
-        print(f"\n  Live notifications captured ({len(notifications)}):")
+        log.info(f"  Live notifications captured ({len(notifications)}):")
         seen: set[str] = set()
         for n in notifications[:20]:
             key = f"{n['uuid']}:{n['value_hex']}"
@@ -1526,28 +1514,28 @@ def _print_summary(
                 val = val[:27] + "…"
             dedup_mark = " [dup]" if key in seen else ""
             seen.add(key)
-            print(f"    {n['ts'][11:19]}  {label:<30}  {val}{dedup_mark}")
+            log.info(f"    {n['ts'][11:19]}  {label:<30}  {val}{dedup_mark}")
         if len(notifications) > 20:
-            print(f"    … and {len(notifications) - 20} more")
+            log.info(f"    … and {len(notifications) - 20} more")
 
     severity = _compute_severity(readable, writable, target)
-    print(f"\n  {'Severity':<18}: {severity.upper()}")
+    log.info(f"  {'Severity':<18}: {severity.upper()}")
     if writable:
-        print(
-            "  Why               : Writable characteristics without auth allow\n"
-            "                      any nearby device to modify state/config."
+        log.info(
+            "  Why: Writable characteristics without auth allow "
+            "any nearby device to modify state/config."
         )
     elif len(readable) > 3:
-        print(
-            "  Why               : Multiple characteristics expose device data\n"
-            "                      without pairing — enables fingerprinting."
+        log.info(
+            "  Why: Multiple characteristics expose device data "
+            "without pairing — enables fingerprinting."
         )
     if notifications:
-        print(
-            "  Notifications     : Device broadcasts data without auth —\n"
-            "                      confirms real-time BLE data leakage."
+        log.info(
+            "  Notifications: Device broadcasts data without auth — "
+            "confirms real-time BLE data leakage."
         )
-    print("─" * 76 + "\n")
+    log.info("─" * 76)
 
 
 def _wait_peripheral_connection(peripheral, timeout: int = 30) -> bool:

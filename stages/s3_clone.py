@@ -478,16 +478,16 @@ def _build_adv_data(target: Target) -> bytes:
 def _print_summary(
     target: Target, connections: list[dict]
 ) -> None:
-    print("\n" + "─" * 76)
-    print("  STAGE 3 SUMMARY -- Identity Clone")
-    print("─" * 76)
-    print(f"  {'Cloned device':<18}: {target.bd_address}")
-    print(f"  {'Device name':<18}: {target.name or '(unnamed)'}")
-    print(f"  {'Device class':<18}: {target.device_class}")
-    print(f"  {'Clone duration':<18}: {CLONE_DURATION}s")
-    print(f"  {'Centrals duped':<18}: {len(connections)}")
+    log.info("\n" + "─" * 76)
+    log.info("  STAGE 3 SUMMARY -- Identity Clone")
+    log.info("─" * 76)
+    log.info(f"  {'Cloned device':<18}: {target.bd_address}")
+    log.info(f"  {'Device name':<18}: {target.name or '(unnamed)'}")
+    log.info(f"  {'Device class':<18}: {target.device_class}")
+    log.info(f"  {'Clone duration':<18}: {CLONE_DURATION}s")
+    log.info(f"  {'Centrals duped':<18}: {len(connections)}")
     if connections:
         for i, c in enumerate(connections):
             dwell = f"  dwell={c['dwell_seconds']}s" if "dwell_seconds" in c else ""
-            print(f"    [{i + 1}] handle={c['conn_handle']}  at {c['timestamp']}{dwell}")
-    print("─" * 76 + "\n")
+            log.info(f"    [{i + 1}] handle={c['conn_handle']}  at {c['timestamp']}{dwell}")
+    log.info("─" * 76 + "\n")

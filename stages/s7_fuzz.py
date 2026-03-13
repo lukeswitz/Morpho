@@ -513,26 +513,26 @@ def _print_summary(
     else:
         handles_str = "none"
 
-    print("\n" + "─" * 76)
-    print("  STAGE 7 SUMMARY -- GATT Write Fuzzer (CLI)")
-    print("─" * 76)
-    print(f"  {'Target':<18}: {target.bd_address}")
-    print(f"  {'Name':<18}: {target.name or '(unnamed)'}")
-    print(f"  {'Device class':<18}: {target.device_class}")
-    print(f"  {'Writable handles':<18}: {handles_str}")
-    print(f"  {'Writes / total':<18}: {writes_sent} / {total_writes}")
-    print(f"  {'Error responses':<18}: {error_count}")
+    log.info("\n" + "─" * 76)
+    log.info("  STAGE 7 SUMMARY -- GATT Write Fuzzer (CLI)")
+    log.info("─" * 76)
+    log.info(f"  {'Target':<18}: {target.bd_address}")
+    log.info(f"  {'Name':<18}: {target.name or '(unnamed)'}")
+    log.info(f"  {'Device class':<18}: {target.device_class}")
+    log.info(f"  {'Writable handles':<18}: {handles_str}")
+    log.info(f"  {'Writes / total':<18}: {writes_sent} / {total_writes}")
+    log.info(f"  {'Error responses':<18}: {error_count}")
     crash_val = "YES — disconnected mid-fuzz" if crash_detected else "no"
-    print(f"  {'Crash detected':<18}: {crash_val}")
-    print(f"\n  {'Severity':<18}: {severity.upper()}")
+    log.info(f"  {'Crash detected':<18}: {crash_val}")
+    log.info(f"\n  {'Severity':<18}: {severity.upper()}")
     if crash_detected:
-        print(
+        log.info(
             "  Why               : Disconnect under fuzz — buffer overflow\n"
             "                      or unhandled exception in BLE GATT stack."
         )
     elif error_count == 0 and writes_sent > 0:
-        print(
+        log.info(
             "  Why               : All payloads accepted including 200-512 byte\n"
             "                      writes — missing ATT payload length validation."
         )
-    print("─" * 76 + "\n")
+    log.info("─" * 76 + "\n")

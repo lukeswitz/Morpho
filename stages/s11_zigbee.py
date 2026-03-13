@@ -491,16 +491,16 @@ def _run_coordinator(
                 f"FINDING [high] zigbee_coordinator_join: {dev['address']}"
             )
 
-    print("\n" + "─" * 76)
-    print("  STAGE 11 (coordinator) — ZigBee Rogue Coordinator")
-    print("─" * 76)
-    print(f"  {'Channel':<28}: {channel}")
-    print(f"  {'Join window':<28}: {ZIGBEE_COORD_SECS}s")
-    print(f"  {'Devices that joined':<28}: {len(joined_devices)}")
+    log.info("\n" + "─" * 76)
+    log.info("  STAGE 11 (coordinator) — ZigBee Rogue Coordinator")
+    log.info("─" * 76)
+    log.info(f"  {'Channel':<28}: {channel}")
+    log.info(f"  {'Join window':<28}: {ZIGBEE_COORD_SECS}s")
+    log.info(f"  {'Devices that joined':<28}: {len(joined_devices)}")
     for d in joined_devices:
         key_str = d['key_hex'] if d.get('key_hex') else "(no key)"
-        print(f"    {d['address']}  key={key_str}")
-    print("─" * 76 + "\n")
+        log.info(f"    {d['address']}  key={key_str}")
+    log.info("─" * 76 + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -544,7 +544,7 @@ def _run_enddevice(
     log.info(
         f"[S11] EndDevice joining PAN 0x{pan_id:04X} on channel {channel} ..."
     )
-    print(
+    log.info(
         f"\n  [S11] ZigBee EndDevice join: PAN 0x{pan_id:04X}  channel {channel}"
     )
 
@@ -601,7 +601,7 @@ def _run_enddevice(
             return
 
         log.info(f"[S11] *** Joined ZigBee PAN 0x{pan_id:04X} as EndDevice! ***")
-        print(f"  [S11] Association accepted! Listening for group traffic ...")
+        log.info(f"  [S11] Association accepted! Listening for group traffic ...")
 
         # Gap 5: inject a test application data frame to probe injection capability.
         _enddev_send_test_frame(enddevice)
@@ -720,20 +720,20 @@ def _print_summary(
     keys: list[bytes],
     decrypted: int,
 ) -> None:
-    print("\n" + "─" * 76)
-    print("  STAGE 11 SUMMARY -- IEEE 802.15.4 / ZigBee Reconnaissance")
-    print("─" * 76)
-    print(f"  {'Channels scanned':<28}: {len(CHANNELS)} (11-26)")
-    print(f"  {'Networks discovered':<28}: {len(networks)}")
-    print(f"  {'Keys recovered':<28}: {len(keys)}")
-    print(f"  {'Packets decrypted':<28}: {decrypted}")
+    log.info("\n" + "─" * 76)
+    log.info("  STAGE 11 SUMMARY -- IEEE 802.15.4 / ZigBee Reconnaissance")
+    log.info("─" * 76)
+    log.info(f"  {'Channels scanned':<28}: {len(CHANNELS)} (11-26)")
+    log.info(f"  {'Networks discovered':<28}: {len(networks)}")
+    log.info(f"  {'Keys recovered':<28}: {len(keys)}")
+    log.info(f"  {'Packets decrypted':<28}: {decrypted}")
     if networks:
-        print()
-        print("  Networks:")
+
+        log.info("  Networks:")
         for pan_id, info in networks.items():
-            print(
+            log.info(
                 f"    PAN 0x{pan_id:04X}  ch={info['channel']:<3}  "
                 f"pkts={info['pkt_count']:<5}  "
                 f"devices={len(info['devices'])}"
             )
-    print("─" * 76 + "\n")
+    log.info("─" * 76 + "\n")

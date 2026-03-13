@@ -669,24 +669,24 @@ def _print_summary(
     join_requests: list[dict],
     data_frames: list[dict],
 ) -> None:
-    print("\n" + "─" * 76)
-    print("  STAGE 15 SUMMARY -- LoRaWAN Recon")
-    print("─" * 76)
-    print(f"  {'Region':<20}: {region}")
-    print(f"  {'Join Requests':<20}: {len(join_requests)}")
-    print(f"  {'Data uplinks':<20}: {len(data_frames)}")
+    log.info("\n" + "─" * 76)
+    log.info("  STAGE 15 SUMMARY -- LoRaWAN Recon")
+    log.info("─" * 76)
+    log.info(f"  {'Region':<20}: {region}")
+    log.info(f"  {'Join Requests':<20}: {len(join_requests)}")
+    log.info(f"  {'Data uplinks':<20}: {len(data_frames)}")
 
     if join_requests:
-        print()
-        print("  Join Requests captured:")
+
+        log.info("  Join Requests captured:")
         for jr in join_requests[:5]:
-            print(
+            log.info(
                 f"    DevEUI={jr['dev_eui']}  "
                 f"AppEUI={jr['app_eui']}  "
                 f"Nonce={jr['dev_nonce']}"
             )
 
     if not join_requests and not data_frames:
-        print("  Result: no LoRaWAN traffic observed on configured channels.")
+        log.info("  Result: no LoRaWAN traffic observed on configured channels.")
 
-    print("─" * 76 + "\n")
+    log.info("─" * 76 + "\n")
