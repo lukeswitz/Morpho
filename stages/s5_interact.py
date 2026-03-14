@@ -534,6 +534,15 @@ def _run_python_api(dongle: WhadDongle, target: Target, engagement_id: str) -> t
                                 f"WRITE {type(exc).__name__}: {exc}"
                             )
 
+                try:
+                    desc = char.get_descriptor(0x2901)
+                    if desc is not None:
+                        raw_desc = desc.read()
+                        if raw_desc:
+                            gc.user_description = raw_desc.decode("utf-8", errors="replace").strip()
+                except Exception:
+                    pass
+
                 if periph_dev and not central.is_connected():
                     log.debug("[S5] central.is_connected() returned False — treating as disconnected")
                     break
@@ -921,6 +930,7 @@ def _char_to_dict(c: GattCharacteristic) -> dict:
         "requires_auth": c.requires_auth,
         "value_text": c.value_text,
         "value_hex": c.value_hex,
+        "user_description": c.user_description,
     }
 
 
@@ -1183,9 +1193,12 @@ def shell(
 
     while True:
         try:
-            raw = prompt_line("  gatt> ").strip()
+            _input = prompt_line("  gatt> ")
         except (EOFError, KeyboardInterrupt):
             break
+        if _input is None:
+            break
+        raw = _input.strip()
         if not raw:
             continue
 
@@ -1486,7 +1499,7 @@ def _print_summary(
     if readable:
         log.info(f"  Readable without authentication ({len(readable)}):")
         for c in readable[:20]:
-            label = _uuid_label(c.uuid)[:30]
+            label = (c.user_description or _uuid_label(c.uuid))[:30]
             val = c.value_text or (
                 f"<hex:{c.value_hex[:24]}{'…' if c.value_hex and len(c.value_hex) > 24 else ''}>"
                 if c.value_hex
@@ -1501,7 +1514,7 @@ def _print_summary(
     if writable:
         log.info(f"  Writable without authentication ({len(writable)}):")
         for c in writable[:20]:
-            log.info(f"    h={c.value_handle:<4}  {_uuid_label(c.uuid)}")
+            log.info(f"    h={c.value_handle:<4}  {c.user_description or _uuid_label(c.uuid)}")
 
     if notifications:
         log.info(f"  Live notifications captured ({len(notifications)}):")

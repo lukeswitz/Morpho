@@ -74,60 +74,61 @@ class LaunchScreen(Screen):
 
     BINDINGS = [("escape", "app.pop_screen", "Back")]
 
+    def __init__(self, initial_cfg: LaunchConfig | None = None) -> None:
+        super().__init__()
+        self._initial = initial_cfg
+
     def compose(self) -> ComposeResult:
+        ini = self._initial
+        # Pre-populate from CLI args if provided, else fall back to config defaults.
+        _name     = (ini.name if ini and ini.name != "unnamed" else
+                     getattr(config, "ENGAGEMENT_NAME", ""))
+        _location = ini.location if ini else ""
+        _iface    = ini.interface if ini else config.INTERFACE
+        _esb      = ini.esb_interface if ini else (config.ESB_INTERFACE or "")
+        _phy      = ini.phy_interface if ini else (config.PHY_SUBGHZ_INTERFACE or "")
+        _ubertooth = ini.ubertooth_interface if ini else (config.UBERTOOTH_INTERFACE or "")
+        _duration = str(ini.scan_duration) if ini else str(config.SCAN_DURATION)
+        # Stage checkboxes: if args specified explicit stages use those; else default opt-in rules
+        _forced_stages: set[int] = ini.stages if (ini and ini.stages) else set()
+
         with ScrollableContainer():
             with Vertical(classes="launch-box"):
                 yield Static(_BBS_ART, classes="bbs-art")
 
                 yield Label("Engagement Name:")
-                yield Input(
-                    value=getattr(config, "ENGAGEMENT_NAME", ""),
-                    placeholder="e.g. Lobby Floor 1",
-                    id="inp-name",
-                )
+                yield Input(value=_name, placeholder="e.g. Lobby Floor 1", id="inp-name")
                 yield Label("Location:")
-                yield Input(placeholder="e.g. Building A", id="inp-location")
+                yield Input(value=_location, placeholder="e.g. Building A", id="inp-location")
 
                 yield Label("BLE Interface:")
-                yield Input(value=config.INTERFACE, id="inp-iface")
+                yield Input(value=_iface, id="inp-iface")
 
                 yield Label("ESB Interface (blank = auto):")
-                yield Input(
-                    value=config.ESB_INTERFACE or "",
-                    placeholder="rfstorm0",
-                    id="inp-esb",
-                )
+                yield Input(value=_esb, placeholder="rfstorm0", id="inp-esb")
                 yield Label("PHY Interface (blank = auto):")
-                yield Input(
-                    value=config.PHY_SUBGHZ_INTERFACE or "",
-                    placeholder="yardstickone0",
-                    id="inp-phy",
-                )
+                yield Input(value=_phy, placeholder="yardstickone0", id="inp-phy")
                 yield Label("Ubertooth Interface (blank = auto):")
-                yield Input(
-                    value=config.UBERTOOTH_INTERFACE or "",
-                    placeholder="ubertooth0",
-                    id="inp-ubertooth",
-                )
+                yield Input(value=_ubertooth, placeholder="ubertooth0", id="inp-ubertooth")
                 yield Label("Scan Duration (seconds):")
-                yield Input(value=str(config.SCAN_DURATION), id="inp-duration")
+                yield Input(value=_duration, id="inp-duration")
 
                 yield Static("Stages  (* = opt-in, unchecked by default)", classes="launch-section-label")
                 with Grid(classes="stage-grid"):
                     for num, label, opt_in in _ALL_STAGES:
                         marker = "*" if opt_in else " "
-                        yield Checkbox(
-                            f"{marker}{label}",
-                            value=not opt_in,
-                            id=f"cb-{num}",
-                        )
+                        if _forced_stages:
+                            checked = num in _forced_stages
+                        else:
+                            checked = not opt_in
+                        yield Checkbox(f"{marker}{label}", value=checked, id=f"cb-{num}")
 
                 yield Checkbox(
                     "Disable active gates (--no-gate)",
                     id="cb-nogate",
-                    value=False,
+                    value=ini.no_gate if ini else False,
                 )
-                yield Checkbox("Debug logging", id="cb-debug", value=False)
+                yield Checkbox("Debug logging", id="cb-debug", value=ini.debug if ini else False)
                 _lbl = RichText("[ LAUNCH ENGAGEMENT ]", style="bold #00ffff")
                 yield Button(_lbl, id="btn-launch")
 

@@ -9,6 +9,107 @@ Multi-protocol wireless red team framework built on [WHAD](https://github.com/wh
 
 ---
 
+## Terminal UI
+
+Butterfly ships a full Textual-based TUI. The classic CLI mode remains available for headless/SSH use; the TUI is the default when launched interactively.
+
+### Launch Screen
+
+A BBS-style configuration form fills every parameter before execution starts — engagement name, location, hardware interfaces, scan duration, and per-stage selection with opt-in stages clearly marked.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  ████  ██ ██ ████  ██ ██ ██     ██  ███  ██ ██ █████  ████          │
+│  ██▄█▄ ██ ██ ██▄██ ▀███▀ ██ ▄█▄ ██ ██▀██ ██▄██ ██▄██ ██▄▄          │
+│  ██ ██ ▀███▀ ██▄█▀   █   ▀██▀██▀  ██▀██  ▀█▀  ██▄▄▄ ▄▄██▀          │
+│                                                                     │
+│  Engagement Name: ____________   Location: ____________             │
+│  BLE Interface:   uart0          Scan Duration (s): 120             │
+│  ESB Interface:   rfstorm0       PHY Interface: yardstickone0       │
+│  Ubertooth:       ubertooth0                                        │
+│                                                                     │
+│  [ ] *S04 reactive jam    [ ] *S06 mitm proxy    [x] S01 env map    │
+│  [x]  S02 conn intel      [x]  S05 gatt shell    [x] S07 fuzzer     │
+│  ... (all 23 stages, opt-in marked with *)                          │
+│                                                                     │
+│               [ LAUNCH ENGAGEMENT ]                                 │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Dashboard Screen
+
+Three-panel live view active during stage execution:
+
+```
+┌──────────────────┬──────────────────────────────────┬──────────────────────┐
+│  STAGE LIST      │  LOG PANE                        │  TARGET TABLE        │
+│                  │                                  │                      │
+│  S01  COMPLETE   │  S01 PASSIVE Environment Map     │  ADDRESS  CLASS RSSI │
+│  S02  COMPLETE   │  12:34:01 [INFO] 14 targets...   │  AA:BB..  med   -62  │
+│  S03  RUNNING    │  12:34:12 [INFO] cloning...      │  CC:DD..  acc   -48  │
+│  S04  SKIPPED    │  12:34:15 [WARN] no response     │  EE:FF..  unk   -71  │
+│  S05  PENDING    │                                  │                      │
+│  ...             │                                  │  findings: 3         │
+├──────────────────┴──────────────────────────────────┴──────────────────────┤
+│  prompt> _                                                                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+| Panel | Width | Content |
+|-------|-------|---------|
+| Stage list | 26 cols | All requested stages with state icons — PENDING / RUNNING / COMPLETE / SKIPPED / ERROR |
+| Log pane | 1fr | Scrolling colored output; stage headers in blue, PASSIVE green, ACTIVE red |
+| Target table | 52 cols | Live BLE device rows; finding count increments in-place |
+| Prompt bar | Full width | Free-text prompts for menu choices and inline inputs |
+
+**Dashboard keyboard bindings:**
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+C` | Abort run — unblocks any pending prompt and exits |
+| `Ctrl+L` | Toggle log pane visibility |
+| `Ctrl+R` | Toggle redaction — replaces all MACs and device names with placeholders in both log and target table (for screen-sharing / demos) |
+
+### Active Gate Modal
+
+Every opt-in stage raises a full-screen confirmation modal before any RF transmission. The operator must explicitly choose one of three actions — there is no default.
+
+```
+  ╔════════════════════════════════════════╗
+  ║   ACTIVE STAGE 06 GATE                 ║
+  ║                                        ║
+  ║   MITM BLE Proxy (Stage 6)            ║
+  ║                                        ║
+  ║   This stage will transmit RF packets. ║
+  ║   Only proceed on authorized targets.  ║
+  ║                                        ║
+  ║  [ YES — proceed ] [SKIP] [ABORT run] ║
+  ╚════════════════════════════════════════╝
+```
+
+### Target Selection Modal
+
+Stages that require target selection present a DataTable sorted by risk score with the same selection grammar as the CLI: numbers (`1,3`), `all`, `smart`, or `skip`. `smart` automatically excludes low-value device classes.
+
+### GATT Shell Screen
+
+After Stage 5 enumeration or a Stage 20 hijack, the TUI switches to a dedicated GATT shell screen with a persistent prompt, timestamped colored output, and immediate re-focus after each command.
+
+```
+  // GATT SHELL  //  AA:BB:CC:DD:EE:FF  //  type 'help'  //  Ctrl+C to exit
+  ──────────────────────────────────────────────────────────────────────────
+  [12:45:01]  SESSION  AA:BB:CC:DD:EE:FF
+  [12:45:02]  read 0x0003  →  42 75 74 74 65 72 66 6C 79
+  gatt://AA:BB:CC:DD:EE:FF> _
+```
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+C` | Send `quit` — disconnect and return to dashboard |
+| `Ctrl+L` | Clear shell log |
+
+---
+
 ## Hardware Support
 
 | Device | Interface | Protocols |
@@ -27,8 +128,9 @@ All devices are auto-detected from `whadup` at startup. Stages are automatically
 | Item | Detail |
 |------|--------|
 | Python | 3.13 (managed with `uv`) |
-| WHAD | `pip install whad` — provides all CLI tools and Python connectors |
-| Optional | `scapy` for raw PDU probe in Stage 8 |
+| WHAD | `whad>=1.2.13` — all CLI tools and Python connectors |
+| Textual | `textual==0.89.0` — TUI framework |
+| Optional | `scapy>=2.5.0` for raw PDU probe in Stage 8 |
 | Optional | `hcitool`, `sdptool` for Stage 21 BR/EDR scan |
 | Optional | `ubertooth-br`, `ubertooth-rx` for Stage 21 piconet sniff |
 
@@ -42,7 +144,7 @@ All devices are auto-detected from `whadup` at startup. Stages are automatically
 
 ```bash
 uv venv && source .venv/bin/activate
-uv pip install whad scapy
+uv pip install -r requirements.txt
 ```
 
 **Linux — USB permissions:**
@@ -64,24 +166,33 @@ whadup
 #   Type: UbertoothOne
 ```
 
+**Manufacturer data files (optional, place in repo root):**
+
+| File | Source | Entries |
+|------|--------|---------|
+| `oui.csv` | [IEEE MA-L registry](https://regauth.standards.ieee.org/standards-ra-web/pub/view.html#registries) | ~35,000 OUI → vendor name mappings |
+| `company_identifiers.yaml` | [Bluetooth SIG assigned numbers](https://www.bluetooth.com/specifications/assigned-numbers/) | 7,200+ company ID → company name mappings |
+
+Both files are loaded at import time. If absent, OUI and company ID lookups are silently skipped — classification still works from name patterns and service UUIDs.
+
 ---
 
 ## Usage
 
 ```bash
-# Auto mode — detects hardware, selects stages by capability
+# TUI mode (default) — interactive form before launch
+python main.py
+
+# TUI with pre-filled fields
 python main.py -n "Engagement1" -l "Building A"
 
-# Explicit stage list
+# CLI mode — explicit stage list, no TUI
 python main.py -n "Engagement1" -l "Building A" --stages 1,2,5,7,8,10,14
 
 # Enable all opt-in stages at once (4=jam, 6=proxy, 9=inject, 16=L2CAP,
 #   17=sub-GHz, 18=ESB active, 19=Unifying API, 20=hijack, 22=RF4CE) — each
 #   still requires operator confirmation at the active-gate prompt
 python main.py -n "Engagement1" -l "Building A" --opt-in
-
-# Explicit opt-in stages without the flag
-python main.py -n "Engagement1" -l "Building A" --stages 1,2,5,9,17,18,19,20
 
 # Specific BLE target only
 python main.py -n "Engagement1" -l "Building A" --target AA:BB:CC:DD:EE:FF
@@ -126,7 +237,7 @@ python main.py -n "Engagement1" --debug
 
 #### Interactive GATT Shell (Stage 5 / Stage 20 post-hijack)
 
-After GATT enumeration (S5) or a successful hijack (S20), an embedded shell lets you interact with the connected peripheral without leaving the framework:
+After GATT enumeration (S5) or a successful hijack (S20), an embedded shell lets you interact with the connected peripheral without leaving the framework. In TUI mode, this opens as a dedicated screen. In CLI mode, it runs in the terminal.
 
 | Command | Description |
 |---------|-------------|
@@ -147,7 +258,7 @@ After GATT enumeration (S5) or a successful hijack (S20), an embedded shell lets
 | Stage | Name | Mode | Description |
 |-------|------|------|-------------|
 | 10 | Logitech Unifying / MouseJack | Active | Four operator-selected modes: **sniff** (Python `whad.unifying.Sniffer` pre-flight for 10 s, then passive scan + keylog + `wanalyze keystroke pairing_cracking` pipeline on PCAP), **inject** (MouseJack text injection with locale), **ducky** (DuckyScript file playback via `wuni-keyboard -d`), **mouse** (scripted move+click or hardware relay via `wuni-mouse -d`). Python mouselog pre-flight runs before CLI in sniff mode. |
-| 14 | ESB Raw Scan | Passive | RfStorm: uses `whad.esb.Sniffer(channel=None)` — stable all-channel loop. nRF52840: uses `whad.esb.Scanner` with monkey-patch for kwargs bug. Flags low-entropy (plaintext) payloads. |
+| 14 | ESB Raw Scan | Passive | RfStorm: uses `whad.esb.Sniffer(channel=None)` — stable all-channel loop. nRF52840: uses `whad.esb.Scanner` with monkey-patch for kwargs bug. Flags low-entropy (plaintext) payloads. Concurrent scanning threads for improved channel coverage. |
 | 18 | ESB PRX/PTX Active | Active | **PRX** — listen as Primary Receiver for frames addressed to a device; `prepare_acknowledgment()` arms a reply payload in the PRX stream loop; capture and entropy-check content. **PTX** — `synchronize()` to device channel then `send_data(waiting_ack=True)` to inject unauthenticated frames; ACK confirmation reported. Always opt-in. |
 | 19 | Unifying Python API | Active | `whad.unifying.Mouse` and `whad.unifying.Keyboard` connectors. Sub-modes: **Dongle** (raw `whad.unifying.Dongle` enumeration) and **Injector** (low-level `whad.unifying.Injector`). **Mouse** mode: `synchronize()` + move spiral + left click. **Keyboard** mode: `synchronize()` + `send_text()`; exposes `keyboard.key` and `aes_counter` introspection. **Ducky** mode: full DuckyScript parser (STRING, ENTER, DELAY, modifier keys, volume tokens VOLUMEUP/VOLUMEDOWN/MUTE) via `Keyboard.send_key()`. Always opt-in. |
 
@@ -192,6 +303,48 @@ Auto-selected stages : 1, 2, 3, 5, 7, 8, 10, 11, 12, 13, 14, 17, 21, 23
 Auto-selected stages : 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19, 20, 21, 22, 23
 ```
 
+In TUI mode, the LaunchScreen pre-checks matching boxes based on the same logic. The operator can override any selection before launch.
+
+---
+
+## Device Classification
+
+Stage 1 classifies every discovered device using a three-source lookup chain:
+
+```
+BD Address OUI                  Device Name / Manufacturer Name       BLE Services
+     │                                      │                               │
+     ▼                                      ▼                               ▼
+oui.csv lookup             name_patterns regex match              service_uuids match
+(IEEE MA-L registry)       (checked against both t.name           (discovered from
+→ t.manufacturer             and t.manufacturer)                   GATT enumeration)
+```
+
+**Manufacturer resolution order (for t.manufacturer field):**
+
+| Priority | Source | Coverage |
+|----------|--------|----------|
+| 1 | OUI lookup via `oui.csv` | Public-address devices — maps first 3 MAC bytes to registered IEEE vendor |
+| 2 | SIG company ID via `company_identifiers.yaml` | Manufacturer-specific AD record company ID → registered company name |
+| 3 | `config.COMPANY_IDS` hardcoded dict | Supplemental / override entries when YAML is absent |
+
+**Device classes and their matching rules:**
+
+| Class | Matched By |
+|-------|-----------|
+| `access_control` | Name patterns: lock, keypad, badge, door, entry; service UUIDs: access control profiles |
+| `medical` | Name patterns: glucose, pulse ox, weight scale, thermometer; service UUIDs: HRS, BLS, GLS |
+| `industrial` | Name patterns: PLC, sensor, gateway, HVAC; manufacturer patterns from industrial OUIs |
+| `smart_home` | Name patterns: bulb, plug, thermostat, hub, sensor; common smart home OUI vendors |
+| `mobile_device` | Name patterns: iPhone, iPad, MacBook, Galaxy, Pixel; manufacturer: Apple Inc, Samsung, Google (via OUI) |
+| `peripheral` | Name patterns: keyboard, mouse, headset, controller, speaker; manufacturer patterns |
+| `it_gear` | Name patterns: router, AP, switch, NIC, dongle |
+| `sensor` | Name patterns: beacon, tag, tracker, temperature, humidity |
+
+Classification priority: **name pattern → manufacturer pattern → service UUID**. Unmatched devices are tagged `unknown`.
+
+Risk scores (0–10) factor in: device class, connectable flag, address type (public = +1), RSSI proximity, and high-value name hits (+3). Devices scoring ≥ 8 are marked CRIT in the TUI target selection modal.
+
 ---
 
 ## Key Configuration (`config.py`)
@@ -205,7 +358,7 @@ Auto-selected stages : 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18
 | `PROXY_INTERFACE` | `hci0` | Second interface for S6 MITM proxy |
 | `SCAN_DURATION` | 120 | Stage 1 BLE scan seconds |
 | `RSSI_MIN_FILTER` | 0 | Ignore devices weaker than N dBm (0 = off) |
-| `ACTIVE_GATE` | True | Require `yes` confirmation before active stages |
+| `ACTIVE_GATE` | True | Require confirmation before active stages |
 | `VERBOSE_MODE` | False | Print WHAD narration lines — useful for training/classroom demos |
 | `UNIFYING_LOCALE` | `us` | Keyboard locale for `wuni-keyboard -l` |
 | `UNIFYING_DUCKY_SCRIPT` | None | Path to DuckyScript file for S10 ducky / S19 ducky mode |
@@ -280,7 +433,7 @@ Auto-selected stages : 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18
 ## Troubleshooting
 
 **`WhadDeviceTimeout` at startup**
-The ButteRFly firmware does not re-emit DeviceReady after initial boot, so `reset()` times out. The framework patches `reset()` to a no-op during connector init — this is expected and handled automatically.
+The ButteRFly firmware does not re-emit DeviceReady after initial boot, so `reset()` times out. The framework patches `reset()` to a no-op and injects a synthetic DeviceInfo during connector init — this is expected and handled automatically.
 
 **`whadup: command not found`**
 Activate the virtual environment: `source .venv/bin/activate`
@@ -292,6 +445,9 @@ sudo usermod -aG dialout $USER && newgrp dialout
 
 **No BLE dongle — only rfstorm0 / yardstickone0 connected**
 The framework detects all available hardware. BLE stages (1–9, 11–13, 15–16) are skipped with a warning; ESB/sub-GHz stages run normally. Connect a ButteRFly or use `--interface` if the BLE dongle is on a different port.
+
+**TUI rendering issues over SSH**
+Ensure the remote terminal is set correctly: `export TERM=xterm-256color`. Textual requires a 256-color terminal. For low-bandwidth sessions, use `python main.py --stages 1,2,5 --no-gate` to bypass the TUI and run CLI mode directly.
 
 **Stage 5/7 returns "No characteristics parsed"**
 Target may not support the `wble-central profile` command format. Stage 8 self-profiles via the Python WHAD API and will still attempt semantic PoC writes.
@@ -310,3 +466,6 @@ The InjectaBLE technique requires the target connection to still be active and w
 
 **Stage 21 — `hcitool: command not found`**
 Install BlueZ: `sudo apt install bluez`. For Ubertooth sniffing, install `ubertooth` package and ensure `ubertooth-br` is in PATH.
+
+**All devices classified as `mobile_device`**
+This indicates the `company_identifiers.yaml` file is present and matching too broadly, or that `t.company_id` is being set from manufacturer-specific AD records containing common protocol company IDs (e.g. 0x004C for iBeacon). Classification falls back to OUI-derived `t.manufacturer` when the YAML is absent. OUI lookup from `oui.csv` is the most reliable source for device class identification.

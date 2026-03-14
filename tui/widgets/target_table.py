@@ -201,6 +201,14 @@ class TargetTableWidget(Widget):
         if addr in self._rows:
             self._render_row(addr)
 
+    def clear_stage_scan_status(self) -> None:
+        """Clear all active-scan indicators after a stage finishes."""
+        cleared = list(self._scan_status.keys())
+        self._scan_status.clear()
+        for addr in cleared:
+            if addr in self._rows:
+                self._render_row(addr)
+
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _render_row(self, real_addr: str) -> None:

@@ -549,7 +549,7 @@ def run_stages(cfg: "LaunchConfig", bridge: "PromptBridge") -> None:
                     jam_picks = select_targets(
                         connectable,
                         prompt="Stage 4 — Pick ONE target to jam",
-                        smart_skip_classes={"it_gear"},
+                        smart_skip_classes={"mobile_device"},
                         max_count=1,
                     )
                     if jam_picks:
@@ -578,7 +578,7 @@ def run_stages(cfg: "LaunchConfig", bridge: "PromptBridge") -> None:
                     connectable,
                     prompt="Stage 5 — Select targets for GATT enumeration",
                     default_all=False,
-                    smart_skip_classes={"it_gear"},
+                    smart_skip_classes={"mobile_device"},
                 )
                 if gatt_picks:
                     if not config.ACTIVE_GATE or active_gate(
@@ -600,14 +600,12 @@ def run_stages(cfg: "LaunchConfig", bridge: "PromptBridge") -> None:
                                     f"[S5] {t.bd_address}: {len(profile)} char(s) found. "
                                     "Enter GATT shell? [y/N]"
                                 )
-                                ans = (
-                                    prompt_line(
-                                        f"Enter GATT shell for {t.bd_address}? [y/N] "
-                                    )
-                                    .strip()
-                                    .lower()
+                                _ans = prompt_line(
+                                    f"Enter GATT shell for {t.bd_address}? [y/N] "
                                 )
-                                if ans == "y":
+                                if _ans is None:
+                                    break
+                                if _ans.strip().lower() == "y":
                                     s5_interact.shell(
                                         hw.ble_dongle, t, profile or [], eng_id
                                     )
@@ -626,7 +624,7 @@ def run_stages(cfg: "LaunchConfig", bridge: "PromptBridge") -> None:
                     connectable,
                     prompt="Stage 6 — Select target for MITM proxy",
                     default_all=False,
-                    smart_skip_classes={"it_gear"},
+                    smart_skip_classes={"mobile_device"},
                     max_count=1,
                 )
                 if proxy_picks:
@@ -673,14 +671,14 @@ def run_stages(cfg: "LaunchConfig", bridge: "PromptBridge") -> None:
                             connectable,
                             prompt="Stage 7 — Select targets for GATT write fuzzing",
                             default_all=False,
-                            smart_skip_classes={"it_gear"},
+                            smart_skip_classes={"mobile_device"},
                         )
                 else:
                     fuzz_picks = select_targets(
                         connectable,
                         prompt="Stage 7 — Select targets for GATT write fuzzing",
                         default_all=False,
-                        smart_skip_classes={"it_gear"},
+                        smart_skip_classes={"mobile_device"},
                     )
 
                 if fuzz_picks:
@@ -1033,10 +1031,25 @@ def main() -> None:
         from tui.bridge import PromptBridge
         run_stages(build_cfg_from_args(args), PromptBridge())
     else:
-        # TUI mode: launch Textual app
+        # TUI mode: launch Textual app.
+        # Pre-import whad.cli.app NOW — before Textual takes over the terminal —
+        # so its module-level side effects (signal() calls, direct FD writes) happen
+        # in plain terminal context, not mid-render inside the TUI event loop.
+        import importlib, os as _os
+        _devnull = _os.open(_os.devnull, _os.O_WRONLY)
+        _saved1, _saved2 = _os.dup(1), _os.dup(2)
+        try:
+            _os.dup2(_devnull, 1); _os.dup2(_devnull, 2)
+            importlib.import_module("whad.cli.app")
+        except Exception:
+            pass
+        finally:
+            _os.dup2(_saved1, 1); _os.dup2(_saved2, 2)
+            _os.close(_devnull); _os.close(_saved1); _os.close(_saved2)
+
         from tui.bridge import PromptBridge
         from tui.app import ButterflyApp
-        ButterflyApp(PromptBridge(), run_stages).run()
+        ButterflyApp(PromptBridge(), run_stages, initial_cfg=build_cfg_from_args(args)).run()
 
 
 def _stages_from_hardware(hw: HardwareMap) -> set[int]:

@@ -85,10 +85,12 @@ class ButterflyApp(App):
         self,
         bridge: PromptBridge,
         run_stages_fn: Callable[[LaunchConfig, PromptBridge], None],
+        initial_cfg: LaunchConfig | None = None,
     ) -> None:
         super().__init__()
         self._bridge = bridge
         self._run_stages_fn = run_stages_fn
+        self._initial_cfg = initial_cfg
         self._worker: threading.Thread | None = None
         self._log_handler: TuiLogHandler | None = None
 
@@ -102,7 +104,7 @@ class ButterflyApp(App):
         """Wire bridge callback, install log handler, push launch screen."""
         self._wire_bridge()
         self._install_log_handler()
-        self.push_screen(LaunchScreen())
+        self.push_screen(LaunchScreen(initial_cfg=self._initial_cfg))
 
     def on_unmount(self) -> None:
         """Ensure worker is unblocked when app shuts down."""
@@ -235,29 +237,8 @@ class ButterflyApp(App):
         self.call_after_refresh(lambda: self._start_worker(cfg))
 
     def _start_worker(self, cfg: LaunchConfig) -> None:
-        # whad.cli.app calls signal(SIGPIPE, SIG_DFL) at module level.
-        # signal() only works in the main thread — pre-import here so the
-        # worker thread never triggers it for the first time.
-        # Suppress fd 1/2 at OS level during the import — WHAD writes directly
-        # to the file descriptors, bypassing sys.stdout/stderr, which bleeds
-        # green text over the TUI until the next resize/repaint.
-        import importlib, os as _os
-        _devnull_fd = _os.open(_os.devnull, _os.O_WRONLY)
-        _saved_fd1 = _os.dup(1)
-        _saved_fd2 = _os.dup(2)
-        try:
-            _os.dup2(_devnull_fd, 1)
-            _os.dup2(_devnull_fd, 2)
-            importlib.import_module("whad.cli.app")
-        except Exception:
-            pass
-        finally:
-            _os.dup2(_saved_fd1, 1)
-            _os.dup2(_saved_fd2, 2)
-            _os.close(_devnull_fd)
-            _os.close(_saved_fd1)
-            _os.close(_saved_fd2)
-        # Re-strip any StreamHandlers the WHAD import may have added to root.
+        # whad.cli.app was pre-imported in main.py before the TUI started.
+        # Re-strip any StreamHandlers it may have added to the root logger.
         if self._log_handler is not None:
             logging.root.handlers = [
                 h for h in logging.root.handlers
@@ -316,17 +297,24 @@ class ButterflyApp(App):
 
     def on_butterfly_app_gatt_shell_push(self, event: GattShellPush) -> None:
         try:
-            self.push_screen(GattShellScreen(event.addr))
+            screen = GattShellScreen(event.addr, self._bridge)
+            self.push_screen(screen)
         except Exception as exc:
             logging.getLogger("tui").error("gatt_shell_push: %s", exc)
+            self._bridge._shell_ready.set()
 
     def on_butterfly_app_gatt_shell_pop(self, event: GattShellPop) -> None:
+        popped = False
         try:
-            screen = self.screen
-            if isinstance(screen, GattShellScreen):
+            if isinstance(self.screen, GattShellScreen):
                 self.pop_screen()
+                popped = True
         except Exception as exc:
             logging.getLogger("tui").error("gatt_shell_pop: %s", exc)
+        if popped:
+            self.call_after_refresh(self._bridge._shell_popped.set)
+        else:
+            self._bridge._shell_popped.set()
 
     def on_butterfly_app_console_output(self, event: ConsoleOutput) -> None:
         try:

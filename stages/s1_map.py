@@ -329,9 +329,23 @@ def _upsert_discovered_device(
             t.name = info["name"]
             t.device_class = classify_device(t)
             t.risk_score = compute_risk_score(t)
-        for svc in info["services"]:
-            if svc not in t.services:
-                t.services.append(svc)
+        if t.company_id is None and info["company_id"] is not None:
+            t.company_id = info["company_id"]
+            if not t.manufacturer:
+                _, mfr_name = decode_manufacturer(
+                    info["manufacturer_bytes"] or b"\x00\x00"
+                )
+                if mfr_name:
+                    t.manufacturer = mfr_name
+        new_svcs = [s for s in info["services"] if s not in t.services]
+        if new_svcs:
+            t.services.extend(new_svcs)
+        # Re-classify if any new identifying data arrived and class is still unknown
+        if t.device_class == "unknown":
+            new_cls = classify_device(t)
+            if new_cls != "unknown":
+                t.device_class = new_cls
+                t.risk_score = compute_risk_score(t)
 
     upsert_target(targets[bd_addr])
     if target_callback is not None:
@@ -482,11 +496,24 @@ def run(
                             t.last_seen = now
                             if ad["name"] and not t.name:
                                 t.name = ad["name"]
-                                t.device_class = classify_device(t)
-                                t.risk_score = compute_risk_score(t)
+                            if t.company_id is None and ad["company_id"] is not None:
+                                t.company_id = ad["company_id"]
+                                if not t.manufacturer:
+                                    _, mfr_name = decode_manufacturer(
+                                        ad["manufacturer_data"] or b"\x00\x00"
+                                    )
+                                    if mfr_name:
+                                        t.manufacturer = mfr_name
                             for svc in ad["services"]:
                                 if svc not in t.services:
                                     t.services.append(svc)
+                            if t.device_class == "unknown":
+                                new_cls = classify_device(t)
+                                if new_cls != "unknown":
+                                    t.device_class = new_cls
+                                    t.risk_score = compute_risk_score(t)
+                                    if target_callback is not None:
+                                        target_callback(t)
                             upsert_target(t)
                         continue
 
@@ -549,12 +576,22 @@ def run(
 
                             if ad["name"] and not t.name:
                                 t.name = ad["name"]
-                                t.device_class = classify_device(t)
-                                t.risk_score = compute_risk_score(t)
-
+                            if t.company_id is None and ad["company_id"] is not None:
+                                t.company_id = ad["company_id"]
+                                if not t.manufacturer:
+                                    _, mfr_name = decode_manufacturer(
+                                        ad["manufacturer_data"] or b"\x00\x00"
+                                    )
+                                    if mfr_name:
+                                        t.manufacturer = mfr_name
                             for svc in ad["services"]:
                                 if svc not in t.services:
                                     t.services.append(svc)
+                            if t.device_class == "unknown":
+                                new_cls = classify_device(t)
+                                if new_cls != "unknown":
+                                    t.device_class = new_cls
+                                    t.risk_score = compute_risk_score(t)
 
                         upsert_target(targets[bd_addr])
                         if target_callback is not None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from textual.app import ComposeResult
 from textual.screen import Screen
@@ -8,37 +9,26 @@ from textual.widgets import Footer, Input, Label, RichLog
 
 from tui.bridge import PromptRequest
 
+if TYPE_CHECKING:
+    from tui.bridge import PromptBridge
+
 
 def _ts() -> str:
     return datetime.now().strftime("%H:%M:%S")
 
 
 class GattShellScreen(Screen):
-    """
-    Hackers (1995)-style GATT interactive shell screen.
-
-    Pushed over DashboardScreen for the duration of a GATT shell session.
-    Shell output from shell_write() arrives via append_output().
-    The gatt> prompt is delivered via show_prompt_for() — same TEXT_INPUT
-    bridge mechanism as the rest of the framework.
-
-    Race condition note: push_screen() schedules mounting asynchronously.
-    ConsoleOutput messages from _shell_banner() often arrive in the same
-    event-loop tick — before compose()/on_mount() have run — so
-    append_output() may be called before the RichLog widget exists.
-    We buffer those early lines in _pending and flush them in on_mount().
-    """
-
     BINDINGS = [
         ("ctrl+c", "exit_shell", "Exit shell"),
         ("ctrl+l", "clear_log", "Clear"),
     ]
 
-    def __init__(self, addr: str) -> None:
+    def __init__(self, addr: str, bridge: "PromptBridge") -> None:
         super().__init__()
         self._addr = addr
+        self._bridge = bridge
         self._prompt_label = f"gatt://{addr}> "
-        self._pending: list[str] = []   # output buffered before on_mount
+        self._pending: list[str] = []
         self._mounted = False
 
     def compose(self) -> ComposeResult:
@@ -67,14 +57,12 @@ class GattShellScreen(Screen):
     def on_mount(self) -> None:
         self._mounted = True
         log = self.query_one("#shell-log", RichLog)
-        log.write(
-            f"[bold #00ff41]  SESSION  {self._addr}[/bold #00ff41]"
-        )
-        # Flush any output that arrived before we were mounted
+        log.write(f"[bold #00ff41]  SESSION  {self._addr}[/bold #00ff41]")
         for line in self._pending:
             self._write_line(log, line)
         self._pending.clear()
         self.app.call_after_refresh(self.query_one("#shell-input", Input).focus)
+        self._bridge._shell_ready.set()
 
     # ── Output routing ─────────────────────────────────────────────────────
 
@@ -109,27 +97,28 @@ class GattShellScreen(Screen):
     # ── Prompt handling ────────────────────────────────────────────────────
 
     def show_prompt_for(self, req: PromptRequest) -> None:
-        """Called by ButterflyApp._notify_prompt when this screen is active."""
         try:
             self.query_one("#shell-prompt-label", Label).update(req.description)
-            inp = self.query_one("#shell-input", Input)
-            inp.value = ""
-            self.app.call_after_refresh(inp.focus)
         except Exception:
             pass
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         event.stop()
-        value = event.value
-        # Echo the command into the log before routing
+        value = event.value.strip()
+        inp = self.query_one("#shell-input", Input)
+        if not value:
+            self.app.call_after_refresh(inp.focus)
+            return
         try:
             from rich.markup import escape
             self.query_one("#shell-log", RichLog).write(
                 f"[bold #00ff41]gatt://{self._addr}> {escape(value)}[/bold #00ff41]"
             )
-            self.query_one("#shell-input", Input).value = ""
+            inp.value = ""
         except Exception:
             pass
+        # Re-focus input so the next command can be typed immediately
+        self.app.call_after_refresh(inp.focus)
         self.app.on_prompt_input(value)
 
     # ── Actions ────────────────────────────────────────────────────────────

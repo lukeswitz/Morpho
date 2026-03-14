@@ -167,11 +167,18 @@ DEVICE_CLASS_RULES = {
             r"badge",
             r"entry",
             r"gate",
+            r"schlage",
+            r"august",
+            r"yale",
+            r"kwikset",
+            r"nuki",
+            r"igloohome",
         ],
         "service_uuids": [],
         "company_ids": [],
     },
     "sensor": {
+        # Pure environmental / condition monitoring devices only
         "name_patterns": [
             r"hvac",
             r"temp",
@@ -183,9 +190,55 @@ DEVICE_CLASS_RULES = {
             r"smoke",
             r"fire",
             r"alarm",
+            r"inkbird",
+            r"sensorpush",
+            r"ibs-th",
+            r"thermoplus",
+            r"blue maestro",
+            r"mopeka",
+            r"telaire",
+            r"bthome",
         ],
-        "service_uuids": ["181A"],
-        "company_ids": [0x0499],
+        "service_uuids": ["181A", "181C", "181D", "181E"],
+        "company_ids": [0x0499],   # Ruuvi Innovations
+    },
+    "smart_home": {
+        # Lighting, plugs, switches, and home automation brands
+        # (many also make sensors but their primary identity is smart home)
+        "name_patterns": [
+            r"govee",
+            r"philips hue",
+            r"\bhue\b",
+            r"lifx",
+            r"nanoleaf",
+            r"\bwiz\b",
+            r"\bwyze\b",
+            r"tradfri",
+            r"\bikea\b",
+            r"wemo",
+            r"\bkasa\b",
+            r"meross",
+            r"shelly",
+            r"sonoff",
+            r"tasmota",
+            r"tuya",
+            r"switchbot",
+            r"\beve\b",
+            r"ledvance",
+            r"sengled",
+            r"aqara",
+            r"xiaomi",
+            r"mijia",
+            r"smart plug",
+            r"smart bulb",
+            r"smart light",
+            r"smart switch",
+        ],
+        "service_uuids": [],
+        "company_ids": [
+            0x02AA,   # Govee Health
+            0x038F,   # Xiaomi
+        ],
     },
     "medical": {
         "name_patterns": [
@@ -195,11 +248,16 @@ DEVICE_CLASS_RULES = {
             r"pump",
             r"vital",
             r"heart",
-            r"bp",
+            r"\bbp\b",
             r"spo2",
             r"glucose",
+            r"oximeter",
+            r"contec",
+            r"nonin",
+            r"omron",
+            r"withings",
         ],
-        "service_uuids": ["180D", "1810"],
+        "service_uuids": ["180D", "1810", "1808", "1809"],
         "company_ids": [0x0157],
     },
     "industrial": {
@@ -210,13 +268,82 @@ DEVICE_CLASS_RULES = {
             r"relay",
             r"controll",
             r"actuator",
+            r"modbus",
+            r"profibus",
+            r"fieldbus",
+            r"gateway",
         ],
         "service_uuids": [],
         "company_ids": [],
     },
-    "it_gear": {
-        "name_patterns": [],
-        "service_uuids": ["1812"],
-        "company_ids": [0x004C, 0x0006, 0x0075, 0x00E0, 0x0171],
+    "peripheral": {
+        # BLE-connected peripherals — HID devices, headphones, speakers.
+        # These ARE valid GATT targets (audio controls, battery, EQ, etc.)
+        # and should NOT be skipped by smart selection.
+        "name_patterns": [
+            r"razer",
+            r"logitech",
+            r"corsair",
+            r"steelseries",
+            r"hyperx",
+            r"roccat",
+            r"keyboard",
+            r"trackpad",
+            r"earbud",
+            r"headphone",
+            r"headset",
+            r"jabra",
+            r"plantronics",
+            r"bose",
+            r"sony wh",
+            r"sony wf",
+            r"sony xm",
+            r"jbl",
+            r"sennheiser",
+            r"meta ray",
+            r"rayban",
+        ],
+        "service_uuids": ["1812"],   # HID over GATT
+        "company_ids": [
+            0x1532,   # Razer
+            0x00D2,   # Logitech
+        ],
+    },
+    "mobile_device": {
+        # Phones, tablets, laptops, smartwatches — personal devices that
+        # typically lock down GATT and aren't useful enumeration targets.
+        # smart selection skips this class.
+        "name_patterns": [
+            r"\bapple\b",
+            r"iphone",
+            r"ipad",
+            r"macbook",
+            r"galaxy\b",
+            r"\bpixel\b",
+            r"oneplus",
+            r"nothing phone",
+            r"surface",
+            r"apple watch",
+            r"galaxy watch",
+            r"fitbit",
+            r"garmin",
+            r"fenix",
+            r"forerunner",
+            r"vivoactive",
+            r"oculus",
+            r"quest",
+            r"airpod",
+            r"beats",
+            r"magic mouse",
+            r"magic keyboard",
+        ],
+        "service_uuids": [],
+        "company_ids": [
+            0x004C,   # Apple
+            0x0006,   # Microsoft
+            0x0075,   # Samsung
+            0x00E0,   # Google
+            0x0046,   # Meta/Facebook
+        ],
     },
 }

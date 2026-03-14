@@ -573,31 +573,38 @@ class WhadDongle:
     def _create_connector(self, connector_cls, *args):
         """Create a BLE connector without triggering a second device reset.
 
-        BLE connector __init__ calls device.open() → device.reset(). open()
-        itself is required — it starts the I/O threads and sets self.__opened=True
-        (WhadDevice.create() does NOT call open(); the device is not yet open).
-        Only the reset() inside open() fails: it sends a Reset command and waits
-        for DeviceReady, but the ButteRFly firmware does not re-emit DeviceReady
-        after boot. Patching reset() to a no-op lets open() complete normally
-        (threads started, opened=True) and allows discover() to succeed.
+        ButteRFly firmware does not respond to DeviceInfoQuery on reconnect.
+        device.discover() times out, leaving device._Device__info = None.
+        The BLE connector __init__ calls device.has_domain(Domain.BtLE) which
+        reads _Device__info — if None, returns False → UnsupportedDomain.
+
+        Fix: patch reset() to no-op (prevents reset timeout), patch discover()
+        to inject a synthetic DeviceInfo when discovery leaves __info empty so
+        has_domain() returns True for BLE-capable hardware.
         """
+        from whad.device.info import DeviceInfo
+        from whad.hub.discovery import Domain
+
         orig_reset = self.device.reset
         orig_discover = self.device.discover
+        ble_capable = self.caps.can_scan or self.caps.can_central or self.caps.can_sniff
 
         self.device.reset = lambda: None
 
-        def _safe_discover():
-            # discover() sends DeviceInfoRequest and waits for a response.
-            # On ButteRFly, after re-open it may time out because the firmware
-            # already sent DeviceReady and won't repeat the info response.
-            # Capabilities were already enumerated during probe_caps(); silently
-            # skip timeout here so the connector initialises normally.
+        def _patched_discover():
             try:
                 orig_discover()
             except Exception as exc:
-                log.debug(f"device.discover() swallowed (probed earlier): {exc}")
+                log.debug("device.discover() failed on reconnect (expected): %s", exc)
+            # If discovery left __info empty, inject a synthetic DeviceInfo so
+            # has_domain(Domain.BtLE) returns True for BLE-capable hardware.
+            if ble_capable and self.device.info is None:
+                self.device._Device__info = DeviceInfo.create(  # noqa: SLF001
+                    capabilities=[int(Domain.BtLE)]
+                )
 
-        self.device.discover = _safe_discover
+        self.device.discover = _patched_discover
+
         try:
             return connector_cls(self.device, *args)
         finally:

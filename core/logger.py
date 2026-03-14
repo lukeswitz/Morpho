@@ -121,20 +121,25 @@ def install_tui(bridge: "PromptBridge") -> None:
     _bridge = bridge
 
 
-def prompt_line(msg: str) -> str:
+def prompt_line(msg: str) -> str | None:
     """Drop-in replacement for raw input() calls in stage files and main.py.
 
     In TUI mode: blocks worker thread via bridge until operator responds in modal.
+    Returns None if the bridge was aborted (app is shutting down).
     In plain mode: falls back to stdin input() identical to before.
     """
     if _bridge is not None:
+        if _bridge._aborted:
+            return None
         from tui.bridge import PromptRequest, PromptKind
         result = _bridge.request_prompt(PromptRequest(
             kind=PromptKind.TEXT_INPUT,
             stage=0,
             description=msg,
         ))
-        return result if result is not None else ""
+        if result is None or _bridge._aborted:
+            return None
+        return result
     _drain_stdin()
     return input(msg)
 
@@ -244,15 +249,17 @@ def shell_write(text: str) -> None:
 
 
 def push_shell(addr: str) -> None:
-    """Signal TUI to push the GATT shell screen for the given address."""
     if _bridge is not None:
+        _bridge._shell_ready.clear()
         _bridge.push_gatt_shell(addr)
+        _bridge._shell_ready.wait(timeout=5.0)
 
 
 def pop_shell() -> None:
-    """Signal TUI to pop the GATT shell screen."""
     if _bridge is not None:
+        _bridge._shell_popped.clear()
         _bridge.pop_gatt_shell()
+        _bridge._shell_popped.wait(timeout=3.0)
 
 
 def select_targets(
@@ -264,16 +271,6 @@ def select_targets(
 ) -> "list[Target]":
     """
     Interactive target picker for active stages.
-
-    Displays a numbered list of candidates (sorted by risk descending).
-
-    Multi-pick mode (max_count=None):
-      Operator enters: numbers (1,3,5), 'all', 'smart', or 'skip'.
-      'smart' returns all non-skipped targets.
-
-    Single-pick mode (max_count=1):
-      Operator enters: one number, 'smart' (auto-picks highest-risk non-skipped),
-      or 'skip'. 'all' and multi-number inputs are rejected.
 
     smart_skip_classes: device classes to exclude in 'smart' mode.
     Returns the selected subset (empty list = skip stage).

@@ -54,6 +54,7 @@ class GattCharacteristic:
     requires_enc:       bool        = False
     value_hex:          Optional[str] = None
     value_text:         Optional[str] = None
+    user_description:   Optional[str] = None
 
 
 @dataclass

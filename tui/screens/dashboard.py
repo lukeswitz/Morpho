@@ -94,6 +94,7 @@ class DashboardScreen(Screen):
             widget.set_stage_state(stage, StageState.SKIPPED)
         else:
             widget.set_stage_state(stage, StageState.COMPLETE)
+        self.query_one(TargetTableWidget).clear_stage_scan_status()
 
     def on_target_found(self, target: object) -> None:
         """Add a row to the live target table."""
@@ -207,35 +208,49 @@ class SelectTargetsModal(Screen):
     def __init__(self, req: PromptRequest) -> None:
         super().__init__()
         self._req = req
-        self._candidates: list = req.options or []
+        self._candidates: list = sorted(
+            req.options or [], key=lambda t: getattr(t, "risk_score", 0), reverse=True
+        )
 
     def compose(self) -> ComposeResult:
         from rich.text import Text as RichText
 
+        smart_skip = self._req.smart_skip_classes or set()
         with Vertical(classes="targets-box"):
             yield Static(
                 f"  {self._req.description} — {len(self._candidates)} candidates",
                 classes="targets-title",
             )
             table: DataTable = DataTable(id="sel-dt", zebra_stripes=True)
-            table.add_columns("#", "RISK", "ADDRESS", "MANUFACTURER", "RSSI", "NAME")
+            table.add_columns("#", "RISK", "ADDRESS", "CLASS", "RSSI", "NAME")
             for i, t in enumerate(self._candidates, 1):
                 risk = self._risk_label(getattr(t, "risk_score", 0))
                 addr = getattr(t, "bd_address", "??")
-                mfr  = (getattr(t, "manufacturer", None) or "—")[:20]
+                cls  = getattr(t, "device_class", "unknown") or "unknown"
                 rssi = f"{getattr(t, 'rssi_avg', 0):.0f}"
                 name = (getattr(t, "name", None) or "—")[:20]
+                row_style = "dim" if cls in smart_skip else ""
                 table.add_row(
-                    RichText(str(i)), RichText(risk), RichText(addr),
-                    RichText(mfr), RichText(rssi), RichText(name),
+                    RichText(str(i), style=row_style),
+                    RichText(risk, style=row_style),
+                    RichText(addr, style=row_style),
+                    RichText(cls[:14], style=row_style),
+                    RichText(rssi, style=row_style),
+                    RichText(name, style=row_style),
                 )
             yield table
             multi = self._req.max_count != 1
-            hint = (
-                "numbers (1,3), 'all', 'smart', 'skip'"
-                if multi
-                else "number, 'smart', 'skip'"
+            skip_label = (
+                f"smart (skip {', '.join(sorted(smart_skip))})"
+                if smart_skip else "smart"
             )
+            hint = (
+                f"numbers (1,3), 'all', '{skip_label}', 'skip'"
+                if multi
+                else f"number, '{skip_label}', 'skip'"
+            )
+            if self._req.default_all and multi:
+                hint += "  [Enter]=all"
             yield Label(f"Enter: {hint}")
             yield Input(placeholder="Selection", id="sel-input")
             yield Button("Confirm", id="btn-confirm", variant="primary")
@@ -260,7 +275,11 @@ class SelectTargetsModal(Screen):
         single = self._req.max_count == 1
         candidates = self._candidates
 
-        if raw in ("", "skip"):
+        if raw == "":
+            if self._req.default_all and not single:
+                return list(candidates)
+            return []
+        if raw == "skip":
             return []
         if raw == "all":
             return [] if single else list(candidates)
