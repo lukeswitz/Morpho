@@ -20,8 +20,8 @@ A BBS-style configuration form fills every parameter before execution starts —
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │  ████  ██ ██ ████  ██ ██ ██     ██  ███  ██ ██ █████  ████          │
-│  ██▄█▄ ██ ██ ██▄██ ▀███▀ ██ ▄█▄ ██ ██▀██ ██▄██ ██▄██ ██▄▄          │
-│  ██ ██ ▀███▀ ██▄█▀   █   ▀██▀██▀  ██▀██  ▀█▀  ██▄▄▄ ▄▄██▀          │
+│  ██▄█▄ ██ ██ ██▄██ ▀███▀ ██ ▄█▄ ██ ██▀██ ██▄██ ██▄██ ██▄▄           │
+│  ██ ██ ▀███▀ ██▄█▀   █    ▀██▀██▀  ██▀██  ▀█▀  ██▄▄▄ ▄▄██▀          │
 │                                                                     │
 │  Engagement Name: ____________   Location: ____________             │
 │  BLE Interface:   uart0          Scan Duration (s): 120             │
@@ -51,24 +51,17 @@ Three-panel live view active during stage execution:
 │  S05  PENDING    │                                  │                      │
 │  ...             │                                  │  findings: 3         │
 ├──────────────────┴──────────────────────────────────┴──────────────────────┤
-│  prompt> _                                                                  │
-└─────────────────────────────────────────────────────────────────────────────┘
+│  prompt> _                                                                 │
+└────────────────────────────────────────────────────────────────────────────┘
 ```
-
-| Panel | Width | Content |
-|-------|-------|---------|
-| Stage list | 26 cols | All requested stages with state icons — PENDING / RUNNING / COMPLETE / SKIPPED / ERROR |
-| Log pane | 1fr | Scrolling colored output; stage headers in blue, PASSIVE green, ACTIVE red |
-| Target table | 52 cols | Live BLE device rows; finding count increments in-place |
-| Prompt bar | Full width | Free-text prompts for menu choices and inline inputs |
 
 **Dashboard keyboard bindings:**
 
 | Key | Action |
 |-----|--------|
-| `Ctrl+C` | Abort run — unblocks any pending prompt and exits |
-| `Ctrl+L` | Toggle log pane visibility |
-| `Ctrl+R` | Toggle redaction — replaces all MACs and device names with placeholders in both log and target table (for screen-sharing / demos) |
+| `Ctrl+c` | Abort run — unblocks any pending prompt and exits |
+| `Ctrl+l` | Toggle log pane visibility |
+| `Ctrl+r` | Toggle redaction — replaces all MACs and device names with placeholders in both log and target table (for screen-sharing / demos) |
 
 ### Active Gate Modal
 
@@ -78,12 +71,12 @@ Every opt-in stage raises a full-screen confirmation modal before any RF transmi
   ╔════════════════════════════════════════╗
   ║   ACTIVE STAGE 06 GATE                 ║
   ║                                        ║
-  ║   MITM BLE Proxy (Stage 6)            ║
+  ║   MITM BLE Proxy (Stage 6)             ║
   ║                                        ║
   ║   This stage will transmit RF packets. ║
   ║   Only proceed on authorized targets.  ║
   ║                                        ║
-  ║  [ YES — proceed ] [SKIP] [ABORT run] ║
+  ║  [ YES — proceed ] [SKIP] [ABORT run]  ║
   ╚════════════════════════════════════════╝
 ```
 
@@ -166,7 +159,7 @@ whadup
 #   Type: UbertoothOne
 ```
 
-**Manufacturer data files (optional, place in repo root):**
+**Manufacturer data files (optional, in repo root):**
 
 | File | Source | Entries |
 |------|--------|---------|
