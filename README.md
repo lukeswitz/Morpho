@@ -120,7 +120,7 @@ All devices are auto-detected from `whadup` at startup. Stages are automatically
 
 | Item | Detail |
 |------|--------|
-| Python | 3.13 (managed with `uv`) |
+| Python | 3.10+ |
 | WHAD | `whad>=1.2.13` — all CLI tools and Python connectors |
 | Textual | `textual==0.89.0` — TUI framework |
 | Optional | `scapy>=2.5.0` for raw PDU probe in Stage 8 |
@@ -136,8 +136,8 @@ All devices are auto-detected from `whadup` at startup. Stages are automatically
 ## Install
 
 ```bash
-uv venv && source .venv/bin/activate
-uv pip install -r requirements.txt
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
 **Linux — USB permissions:**
