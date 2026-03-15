@@ -11,7 +11,7 @@ Multi-protocol wireless red team framework built on [WHAD](https://github.com/wh
 
 ## Terminal UI
 
-Butterfly ships a full Textual-based TUI. The classic CLI mode remains available for headless/SSH use; the TUI is the default when launched interactively.
+Butterfly ships a full Textual-based TUI. Pass `--plain` to disable it and use stdin prompts instead (headless/SSH use); the TUI is the default when stdout is a TTY.
 
 ### Dashboard Screen
 
@@ -157,8 +157,11 @@ python rubywaves.py
 # TUI with pre-filled fields
 python rubywaves.py -n "Engagement1" -l "Building A"
 
-# CLI mode — explicit stage list, no TUI
-python rubywaves.py -n "Engagement1" -l "Building A" --stages 1,2,5,7,8,10,14
+# Plain / CLI mode — disables TUI, uses stdin prompts (SSH / headless use)
+python rubywaves.py --plain -n "Engagement1" -l "Building A"
+
+# Plain mode with explicit stage list
+python rubywaves.py --plain -n "Engagement1" -l "Building A" --stages 1,2,5,7,8,10,14
 
 # Enable all opt-in stages at once (4=jam, 6=proxy, 9=inject, 16=L2CAP,
 #   17=sub-GHz, 18=ESB active, 19=Unifying API, 20=hijack, 22=RF4CE) — each
@@ -418,7 +421,7 @@ sudo usermod -aG dialout $USER && newgrp dialout
 The framework detects all available hardware. BLE stages (1–9, 11–13, 15–16) are skipped with a warning; ESB/sub-GHz stages run normally. Connect a ButteRFly or use `--interface` if the BLE dongle is on a different port.
 
 **TUI rendering issues over SSH**
-Ensure the remote terminal is set correctly: `export TERM=xterm-256color`. Textual requires a 256-color terminal. For low-bandwidth sessions, use `python rubywaves.py --stages 1,2,5 --no-gate` to bypass the TUI and run CLI mode directly.
+Ensure the remote terminal is set correctly: `export TERM=xterm-256color`. Textual requires a 256-color terminal. For low-bandwidth sessions, use `python rubywaves.py --plain --stages 1,2,5 --no-gate` to run in plain CLI mode without the TUI.
 
 **Stage 5/7 returns "No characteristics parsed"**
 Target may not support the `wble-central profile` command format. Stage 8 self-profiles via the Python WHAD API and will still attempt semantic PoC writes.
