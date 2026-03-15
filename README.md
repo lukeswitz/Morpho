@@ -59,9 +59,10 @@ Three-panel live view active during stage execution:
 
 | Key | Action |
 |-----|--------|
-| `Ctrl+c` | Abort run — unblocks any pending prompt and exits |
-| `Ctrl+l` | Toggle log pane visibility |
-| `Ctrl+r` | Toggle redaction — replaces all MACs and device names with placeholders in both log and target table (for screen-sharing / demos) |
+| `Ctrl+C` | Abort run — unblocks any pending prompt and exits |
+| `Ctrl+X` | Skip current stage — unblocks any pending prompt with a graceful skip value and advances to the next stage |
+| `Ctrl+L` | Toggle log pane visibility |
+| `Ctrl+R` | Toggle redaction — replaces all MACs and device names with placeholders in both log and target table (for screen-sharing / demos) |
 
 ### Active Gate Modal
 
@@ -174,34 +175,34 @@ Both files are loaded at import time. If absent, OUI and company ID lookups are 
 
 ```bash
 # TUI mode (default) — interactive form before launch
-python main.py
+python rubywaves.py
 
 # TUI with pre-filled fields
-python main.py -n "Engagement1" -l "Building A"
+python rubywaves.py -n "Engagement1" -l "Building A"
 
 # CLI mode — explicit stage list, no TUI
-python main.py -n "Engagement1" -l "Building A" --stages 1,2,5,7,8,10,14
+python rubywaves.py -n "Engagement1" -l "Building A" --stages 1,2,5,7,8,10,14
 
 # Enable all opt-in stages at once (4=jam, 6=proxy, 9=inject, 16=L2CAP,
 #   17=sub-GHz, 18=ESB active, 19=Unifying API, 20=hijack, 22=RF4CE) — each
 #   still requires operator confirmation at the active-gate prompt
-python main.py -n "Engagement1" -l "Building A" --opt-in
+python rubywaves.py -n "Engagement1" -l "Building A" --opt-in
 
 # Specific BLE target only
-python main.py -n "Engagement1" -l "Building A" --target AA:BB:CC:DD:EE:FF
+python rubywaves.py -n "Engagement1" -l "Building A" --target AA:BB:CC:DD:EE:FF
 
 # Override hardware interfaces manually
-python main.py --interface uart0 --esb-interface rfstorm0 \
+python rubywaves.py --interface uart0 --esb-interface rfstorm0 \
                --phy-interface yardstickone0 --ubertooth-interface ubertooth0
 
 # ESB/sub-GHz only (no BLE dongle connected)
-python main.py -n "Engagement1" --stages 10,14,17
+python rubywaves.py -n "Engagement1" --stages 10,14,17
 
 # Extended BLE scan, skip prompts
-python main.py -n "Engagement1" --scan-duration 300 --no-gate
+python rubywaves.py -n "Engagement1" --scan-duration 300 --no-gate
 
 # Debug logging
-python main.py -n "Engagement1" --debug
+python rubywaves.py -n "Engagement1" --debug
 ```
 
 ---
@@ -440,7 +441,7 @@ sudo usermod -aG dialout $USER && newgrp dialout
 The framework detects all available hardware. BLE stages (1–9, 11–13, 15–16) are skipped with a warning; ESB/sub-GHz stages run normally. Connect a ButteRFly or use `--interface` if the BLE dongle is on a different port.
 
 **TUI rendering issues over SSH**
-Ensure the remote terminal is set correctly: `export TERM=xterm-256color`. Textual requires a 256-color terminal. For low-bandwidth sessions, use `python main.py --stages 1,2,5 --no-gate` to bypass the TUI and run CLI mode directly.
+Ensure the remote terminal is set correctly: `export TERM=xterm-256color`. Textual requires a 256-color terminal. For low-bandwidth sessions, use `python rubywaves.py --stages 1,2,5 --no-gate` to bypass the TUI and run CLI mode directly.
 
 **Stage 5/7 returns "No characteristics parsed"**
 Target may not support the `wble-central profile` command format. Stage 8 self-profiles via the Python WHAD API and will still attempt semantic PoC writes.

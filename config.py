@@ -3,8 +3,8 @@ from pathlib import Path
 
 INTERFACE = "uart0"
 PROXY_INTERFACE = "hci0"   # second interface for Stage 6 wble-proxy
-SCAN_DURATION = 120
-CONN_SNIFF_DURATION = 60
+SCAN_DURATION = 60
+CONN_SNIFF_DURATION = 45
 ACTIVE_GATE = True
 VERBOSE_MODE = False        # True = print [WHAD] narration lines (training/classroom mode)
 DONGLE_TIMEOUT = 5          # seconds allowed for each capability probe at startup

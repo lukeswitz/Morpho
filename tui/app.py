@@ -132,6 +132,9 @@ class ButterflyApp(App):
         self._bridge._notify_prompt = _notify_prompt  # type: ignore[method-assign]
 
         def _notify_stage_start(stage: int, title: str, passive: bool) -> None:
+            # Clear any leftover skip flag so the new stage starts clean.
+            self._bridge.clear_skip()
+
             def _do() -> None:
                 try:
                     screen = app.screen
@@ -353,3 +356,7 @@ class ButterflyApp(App):
         """Abort the run: unblock any waiting prompt and exit the app."""
         self._bridge.abort()
         self.exit()
+
+    def skip_current_stage(self) -> None:
+        """Skip the currently running stage without aborting the run."""
+        self._bridge.request_stage_skip()

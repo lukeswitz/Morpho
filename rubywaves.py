@@ -123,7 +123,7 @@ def _help_text() -> str:
         "        --opt-in                  enable all opt-in stages",
         "        --no-gate                 skip active-stage prompts",
         "        --target BD_ADDR          focus address (repeat ×n)",
-        "        --scan-duration SECS      s1 ble scan duration  [120]",
+        "        --scan-duration SECS      s1 ble scan duration  [60]",
         "        --debug                   debug logging",
         "",
         f"  EXAMPLES {'─' * 55}",
@@ -511,7 +511,7 @@ def run_stages(cfg: "LaunchConfig", bridge: "PromptBridge") -> None:
             high_value = [
                 t
                 for t in targets
-                if t.connectable and t.risk_score >= 6
+                if t.connectable and t.risk_score >= 4
             ]
             if high_value:
                 stage_banner(3, "Identity Cloning / Rogue Peripheral", passive=False)

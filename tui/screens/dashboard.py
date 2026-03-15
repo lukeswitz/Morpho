@@ -27,6 +27,7 @@ class DashboardScreen(Screen):
 
     BINDINGS = [
         ("ctrl+c", "abort_run", "Abort"),
+        ("ctrl+x", "skip_stage", "Skip stage"),
         ("ctrl+l", "toggle_log", "Log"),
         ("ctrl+r", "toggle_redact", "Redact"),
     ]
@@ -52,6 +53,11 @@ class DashboardScreen(Screen):
     def action_abort_run(self) -> None:
         """Ctrl+C: abort the run cleanly."""
         self.app.abort_run()
+
+    def action_skip_stage(self) -> None:
+        """Ctrl+X: skip the currently running stage and continue to the next."""
+        self.app.skip_current_stage()
+        self.on_append_log("SKIP requested — advancing to next stage", "WARNING")
 
     def action_toggle_redact(self) -> None:
         """Ctrl+R: toggle redaction of MACs and device names in all output."""

@@ -100,19 +100,19 @@ LaunchScreen {
 }
 
 .bbs-art {
-    color: #2080b0;
+    color: #9b111e;
     text-style: bold;
     margin-bottom: 1;
 }
 
 .launch-section-label {
-    color: #c090e0;
+    color: #4090d0;
     text-style: bold;
     margin-top: 1;
 }
 
 .launch-box > Label {
-    color: #c090e0;
+    color: #4090d0;
     text-style: bold;
 }
 
