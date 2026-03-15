@@ -78,15 +78,15 @@ class TargetTableWidget(Widget):
 
     def compose(self) -> ComposeResult:
         table: DataTable = DataTable(id="target-dt", zebra_stripes=True)
-        k_risk    = table.add_column("RISK")
-        k_addr    = table.add_column("ADDRESS")
-        k_adv     = table.add_column("ADV")
-        k_atype   = table.add_column("ADDR")
-        k_cls     = table.add_column("CLASS")
-        k_mfr     = table.add_column("MANUFACTURER")
-        k_rssi    = table.add_column("RSSI")
-        k_name    = table.add_column("NAME")
-        k_results = table.add_column("RESULTS")
+        k_risk    = table.add_column("RISK",         width=6)
+        k_addr    = table.add_column("ADDRESS",      width=19)
+        k_adv     = table.add_column("ADV",          width=12)
+        k_atype   = table.add_column("ADDR",         width=6)
+        k_cls     = table.add_column("CLASS",        width=16)
+        k_mfr     = table.add_column("MANUFACTURER", width=14)
+        k_rssi    = table.add_column("RSSI",         width=6)
+        k_name    = table.add_column("NAME",         width=22)
+        k_results = table.add_column("RESULTS",      width=12)
         (
             self._col_risk, self._col_addr, self._col_adv, self._col_atype,
             self._col_cls, self._col_mfr, self._col_rssi, self._col_name,

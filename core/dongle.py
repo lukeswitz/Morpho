@@ -426,7 +426,7 @@ class WhadDongle:
         from whad.ble import Peripheral
         from whad.ble.profile import GenericProfile
         self.assert_cap("can_peripheral")
-        p = self._create_connector(Peripheral, profile or GenericProfile())
+        p = self._create_connector(Peripheral, profile=profile or GenericProfile())
         self._whad_log("Peripheral created")
         return p
 
@@ -570,7 +570,7 @@ class WhadDongle:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _create_connector(self, connector_cls, *args):
+    def _create_connector(self, connector_cls, *args, **kwargs):
         """Create a BLE connector without triggering a second device reset.
 
         ButteRFly firmware does not respond to DeviceInfoQuery on reconnect.
@@ -606,7 +606,7 @@ class WhadDongle:
         self.device.discover = _patched_discover
 
         try:
-            return connector_cls(self.device, *args)
+            return connector_cls(self.device, *args, **kwargs)
         finally:
             self.device.reset = orig_reset
             self.device.discover = orig_discover

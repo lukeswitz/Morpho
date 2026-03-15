@@ -1,7 +1,7 @@
 <div align="center">
 <img width="500" alt="rubywaves" src="https://github.com/user-attachments/assets/2560fdc5-341a-4fdb-8160-73fb4ed4f6ac" />
 
-Multi-protocol wireless red team framework built on [WHAD](https://github.com/whad-team/whad-client). Runs a structured 23-stage assessment pipeline — BLE, ESB, Logitech Unifying, ZigBee, LoRaWAN, sub-GHz PHY, Bluetooth Classic, RF4CE, and raw 802.15.4 — with per-stage authorization gates, automatic hardware detection, SQLite findings storage, and Markdown/JSON reporting.
+Multi-protocol wireless red team framework built on [WHAD](https://github.com/whad-team/whad-client). Runs a structured 23-stage assessment pipeline — BLE, ESB, Logitech Unifying, ZigBee, LoRaWAN, sub-GHz PHY, Bluetooth Classic, RF4CE, and raw 802.15.4. Features per-stage authorization gates, automatic hardware detection, SQLite findings storage, and Markdown/JSON reporting.
 </div>
 
 > [!IMPORTANT]
@@ -12,29 +12,6 @@ Multi-protocol wireless red team framework built on [WHAD](https://github.com/wh
 ## Terminal UI
 
 Butterfly ships a full Textual-based TUI. The classic CLI mode remains available for headless/SSH use; the TUI is the default when launched interactively.
-
-### Launch Screen
-
-A BBS-style configuration form fills every parameter before execution starts — engagement name, location, hardware interfaces, scan duration, and per-stage selection with opt-in stages clearly marked.
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│  ████  ██ ██ ████  ██ ██ ██     ██  ███  ██ ██ █████  ████          │
-│  ██▄█▄ ██ ██ ██▄██ ▀███▀ ██ ▄█▄ ██ ██▀██ ██▄██ ██▄██ ██▄▄           │
-│  ██ ██ ▀███▀ ██▄█▀   █    ▀██▀██▀  ██▀██  ▀█▀  ██▄▄▄ ▄▄██▀          │
-│                                                                     │
-│  Engagement Name: ____________   Location: ____________             │
-│  BLE Interface:   uart0          Scan Duration (s): 120             │
-│  ESB Interface:   rfstorm0       PHY Interface: yardstickone0       │
-│  Ubertooth:       ubertooth0                                        │
-│                                                                     │
-│  [ ] *S04 reactive jam    [ ] *S06 mitm proxy    [x] S01 env map    │
-│  [x]  S02 conn intel      [x]  S05 gatt shell    [x] S07 fuzzer     │
-│  ... (all 23 stages, opt-in marked with *)                          │
-│                                                                     │
-│               [ LAUNCH ENGAGEMENT ]                                 │
-└─────────────────────────────────────────────────────────────────────┘
-```
 
 ### Dashboard Screen
 
@@ -350,7 +327,7 @@ Risk scores (0–10) factor in: device class, connectable flag, address type (pu
 | `PHY_SUBGHZ_INTERFACE` | auto | Sub-GHz PHY dongle (auto-detected yardstickone0) |
 | `UBERTOOTH_INTERFACE` | auto | Passive BLE sniffer (auto-detected ubertooth0) |
 | `PROXY_INTERFACE` | `hci0` | Second interface for S6 MITM proxy |
-| `SCAN_DURATION` | 120 | Stage 1 BLE scan seconds |
+| `SCAN_DURATION` | 60 | Stage 1 BLE scan seconds |
 | `RSSI_MIN_FILTER` | 0 | Ignore devices weaker than N dBm (0 = off) |
 | `ACTIVE_GATE` | True | Require confirmation before active stages |
 | `VERBOSE_MODE` | False | Print WHAD narration lines — useful for training/classroom demos |

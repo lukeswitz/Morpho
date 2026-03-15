@@ -508,28 +508,32 @@ def run_stages(cfg: "LaunchConfig", bridge: "PromptBridge") -> None:
                 log.info("Stage 2 skipped: no connectable targets found.")
 
         if 3 in stages_requested and targets:
-            high_value = [
-                t
-                for t in targets
-                if t.connectable and t.risk_score >= 4
-            ]
-            if high_value:
+            connectable = [t for t in targets if t.connectable and t.risk_score >= 4]
+            if connectable:
                 stage_banner(3, "Identity Cloning / Rogue Peripheral", passive=False)
-                if not config.ACTIVE_GATE or active_gate(
-                    3,
-                    f"Clone {high_value[0].bd_address} "
-                    f"({high_value[0].device_class}, "
-                    f"risk={high_value[0].risk_score})",
-                ):
-                    from stages import s3_clone
+                clone_picks = select_targets(
+                    connectable,
+                    prompt="Stage 3 — Pick ONE target to clone",
+                    smart_skip_classes={"mobile_device"},
+                    max_count=1,
+                )
+                if clone_picks:
+                    clone_target = clone_picks[0]
+                    if not config.ACTIVE_GATE or active_gate(
+                        3,
+                        f"Clone {clone_target.bd_address} "
+                        f"({clone_target.device_class}, "
+                        f"risk={clone_target.risk_score})",
+                    ):
+                        from stages import s3_clone
 
-                    s3_clone.run(
-                        hw.ble_dongle, high_value[0], eng_id,
-                        gatt_profiles.get(high_value[0].bd_address),
-                    )
+                        s3_clone.run(
+                            hw.ble_dongle, clone_target, eng_id,
+                            gatt_profiles.get(clone_target.bd_address),
+                        )
             else:
                 log.info(
-                    "Stage 3 skipped: no high-value connectable targets."
+                    "Stage 3 skipped: no connectable targets with risk >= 4."
                 )
 
         if 4 in stages_requested and (targets or connections):
