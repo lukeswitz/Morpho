@@ -114,6 +114,8 @@ All devices are auto-detected from `whadup` at startup. Stages are automatically
 ## Install
 
 ```bash
+git clone https://github.com/lukeswitz/RubyWaves.git
+cd RubyWaves
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
