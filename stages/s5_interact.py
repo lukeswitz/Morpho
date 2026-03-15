@@ -12,6 +12,8 @@ import re
 import shutil
 import subprocess
 import threading
+import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 
 from whad.ble.exceptions import (
@@ -79,11 +81,14 @@ NOTIFY_SILENCE_SECS = 4    # exit early after this many seconds with no new noti
 
 
 def run(
-    dongle: WhadDongle, target: Target, engagement_id: str
+    dongle: WhadDongle,
+    target: Target,
+    engagement_id: str,
+    cancel: Callable[[], bool] | None = None,
 ) -> tuple[list[int], list[dict]]:
     """Returns (writable_handles, full_profile) for S5→S7/S8 handoff."""
     if _cli_available():
-        return _run_cli(dongle, target, engagement_id)
+        return _run_cli(dongle, target, engagement_id, cancel=cancel)
     return _run_python_api(dongle, target, engagement_id)
 
 
@@ -98,7 +103,12 @@ def _cli_available() -> bool:
     )
 
 
-def _run_cli(dongle: WhadDongle, target: Target, engagement_id: str) -> tuple[list[int], list[dict]]:
+def _run_cli(
+    dongle: WhadDongle,
+    target: Target,
+    engagement_id: str,
+    cancel: Callable[[], bool] | None = None,
+) -> tuple[list[int], list[dict]]:
     addr = target.bd_address
     is_random = target.address_type != "public"
     rand_flag = "-r" if is_random else ""
@@ -109,8 +119,7 @@ def _run_cli(dongle: WhadDongle, target: Target, engagement_id: str) -> tuple[li
     )
 
     dongle.device.close()
-    import time as _time
-    _time.sleep(1.0)
+    time.sleep(1.0)
 
     cmd = (
         f"wble-connect -i {config.INTERFACE} {rand_flag} {addr} "
@@ -122,25 +131,51 @@ def _run_cli(dongle: WhadDongle, target: Target, engagement_id: str) -> tuple[li
     stderr = ""
     returncode = -1
 
+    cancelled = False
     try:
-        result = subprocess.run(
-            cmd,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=CLI_TIMEOUT,
+        stdout_buf: list[str] = []
+        stderr_buf: list[str] = []
+        proc = subprocess.Popen(
+            cmd, shell=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
-        stdout = result.stdout
-        stderr = result.stderr
-        returncode = result.returncode
-    except subprocess.TimeoutExpired:
-        log.warning(f"[CLI] Timeout reaching {addr} after {CLI_TIMEOUT}s")
+        t_out = threading.Thread(
+            target=lambda: stdout_buf.append(proc.stdout.read()), daemon=True
+        )
+        t_err = threading.Thread(
+            target=lambda: stderr_buf.append(proc.stderr.read()), daemon=True
+        )
+        t_out.start()
+        t_err.start()
+        deadline = time.time() + CLI_TIMEOUT
+        while proc.poll() is None:
+            time.sleep(0.3)
+            if cancel is not None and cancel():
+                proc.kill()
+                proc.wait(timeout=2.0)
+                t_out.join(1.0)
+                t_err.join(1.0)
+                cancelled = True
+                break
+            if time.time() >= deadline:
+                proc.kill()
+                proc.wait(timeout=2.0)
+                log.warning(f"[CLI] Timeout reaching {addr} after {CLI_TIMEOUT}s")
+                break
+        t_out.join()
+        t_err.join()
+        stdout = stdout_buf[0] if stdout_buf else ""
+        stderr = stderr_buf[0] if stderr_buf else ""
+        returncode = proc.returncode if proc.returncode is not None else -1
     except Exception as exc:
         log.error(
             f"[CLI] Subprocess error for {addr}: {type(exc).__name__}: {exc}"
         )
     finally:
         _reopen_dongle(dongle)
+
+    if cancelled:
+        return [], []
 
     if not stdout.strip():
         log.warning(

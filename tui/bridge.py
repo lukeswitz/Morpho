@@ -70,9 +70,7 @@ class PromptBridge:
         self._app_call = call_from_thread
 
     def request_prompt(self, req: PromptRequest) -> Any:
-        # Fast path: skip was requested before we started waiting.
         if self._skip_event.is_set():
-            self._skip_event.clear()
             return _SKIP_RESULT.get(req.kind)
 
         self._event.clear()

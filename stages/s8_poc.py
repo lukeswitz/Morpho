@@ -87,7 +87,7 @@ def run(
     engagement_id: str,
     gatt_profile: list[dict],
     poc_name: str = "BLE-PoC",
-) -> None:
+) -> int:
     addr      = target.bd_address
     is_random = target.address_type != "public"
 
@@ -111,14 +111,14 @@ def run(
         periph_dev = central.connect(addr, random=is_random, timeout=CONNECT_TIMEOUT)
         if periph_dev is None:
             log.warning(f"[S8] Could not connect to {addr} (timeout).")
-            return
+            return 0
 
         log.info(f"[S8] Connected to {addr}.")
 
         try:
             if not central.is_connected():
                 log.warning(f"[S8] central.is_connected() reports not connected after connect() on {addr}.")
-                return
+                return 0
         except Exception as _e:
             log.debug(f"[S8] is_connected() unavailable: {_e}")
 
@@ -162,7 +162,7 @@ def run(
 
         if not gatt_profile:
             log.warning(f"[S8] No GATT profile for {addr} — skipping PoC.")
-            return
+            return 0
 
         writable = [
             c for c in gatt_profile
@@ -176,12 +176,12 @@ def run(
 
         if not writable:
             log.info(f"[S8] No writable characteristics on {addr}.")
-            return
+            return 0
 
         actions = _plan_actions(writable, notify_uuids)
         if not actions:
             log.info(f"[S8] No semantic actions applicable for {addr}.")
-            return
+            return 0
 
         _lbls = [a["label"] for a in actions]
         if len(_lbls) > 8:
@@ -970,6 +970,7 @@ def _record_finding(
     )
     insert_finding(finding)
     log.info(f"FINDING [{severity}] gatt_poc: {target.bd_address} — {'; '.join(parts)}")
+    return 1
 
 
 def _print_summary(

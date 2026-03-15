@@ -19,6 +19,9 @@ import json
 import re
 import shutil
 import subprocess
+import threading
+import time
+from collections.abc import Callable
 
 from whad.device import WhadDevice
 
@@ -34,7 +37,12 @@ log = get_logger("s6_proxy")
 PROXY_TIMEOUT = 300   # seconds the proxy runs before auto-stop
 
 
-def run(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
+def run(
+    dongle: WhadDongle,
+    target: Target,
+    engagement_id: str,
+    cancel: Callable[[], bool] | None = None,
+) -> None:
     """Run the MITM proxy stage against a single target.
 
     Args:
@@ -91,23 +99,27 @@ def run(dongle: WhadDongle, target: Target, engagement_id: str) -> None:
     log.debug(f"[S6] Command: {cmd}")
 
     dongle.device.close()
-    import time as _time
     _pcap.parent.mkdir(parents=True, exist_ok=True)
     _wait_for_port_free(config.INTERFACE)
 
     returncode = -1
-    # Run with inherited stdout/stderr so the operator sees live proxy output.
-    # Do NOT use capture_output — it suppresses wble-proxy's status lines.
-    log.info("[S6] Proxy running — press Ctrl+C to stop.")
+    log.info("[S6] Proxy running — press Ctrl+X to stop.")
     try:
-        result = subprocess.run(
-            cmd,
-            shell=True,
-            timeout=PROXY_TIMEOUT,
-        )
-        returncode = result.returncode
-    except subprocess.TimeoutExpired:
-        log.info(f"[S6] Proxy session ended after {PROXY_TIMEOUT}s timeout.")
+        proc = subprocess.Popen(cmd, shell=True)
+        deadline = time.time() + PROXY_TIMEOUT
+        while proc.poll() is None:
+            time.sleep(0.3)
+            if cancel is not None and cancel():
+                proc.kill()
+                proc.wait(timeout=2.0)
+                log.info("[S6] Proxy stopped by operator.")
+                break
+            if time.time() >= deadline:
+                proc.kill()
+                proc.wait(timeout=2.0)
+                log.info(f"[S6] Proxy session ended after {PROXY_TIMEOUT}s timeout.")
+                break
+        returncode = proc.returncode if proc.returncode is not None else -1
     except KeyboardInterrupt:
         log.info("[S6] Proxy interrupted by operator.")
     except Exception as exc:

@@ -23,7 +23,7 @@ _BBS_ART = """\
 _ALL_STAGES: list[tuple[int, str, bool]] = [
     (1,  "S01 env mapping",      False),
     (2,  "S02 conn intel",       False),
-    (3,  "S03 identity clone",   False),
+    (3,  "S03 identity clone",   True),
     (4,  "S04 reactive jam",     True),
     (5,  "S05 gatt enum+shell",  False),
     (6,  "S06 mitm proxy",       True),
@@ -74,9 +74,14 @@ class LaunchScreen(Screen):
 
     BINDINGS = [("escape", "app.pop_screen", "Back")]
 
-    def __init__(self, initial_cfg: LaunchConfig | None = None) -> None:
+    def __init__(
+        self,
+        initial_cfg: LaunchConfig | None = None,
+        supported_stages: set[int] | None = None,
+    ) -> None:
         super().__init__()
         self._initial = initial_cfg
+        self._supported_stages = supported_stages
 
     def compose(self) -> ComposeResult:
         ini = self._initial
@@ -117,11 +122,22 @@ class LaunchScreen(Screen):
                 with Grid(classes="stage-grid"):
                     for num, label, opt_in in _ALL_STAGES:
                         marker = "*" if opt_in else " "
-                        if _forced_stages:
+                        unsupported = (
+                            self._supported_stages is not None
+                            and num not in self._supported_stages
+                        )
+                        if unsupported:
+                            checked = False
+                        elif _forced_stages:
                             checked = num in _forced_stages
                         else:
                             checked = not opt_in
-                        yield Checkbox(f"{marker}{label}", value=checked, id=f"cb-{num}")
+                        yield Checkbox(
+                            f"{marker}{label}",
+                            value=checked,
+                            id=f"cb-{num}",
+                            disabled=unsupported,
+                        )
 
                 yield Checkbox(
                     "Disable active gates (--no-gate)",

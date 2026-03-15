@@ -86,11 +86,13 @@ class ButterflyApp(App):
         bridge: PromptBridge,
         run_stages_fn: Callable[[LaunchConfig, PromptBridge], None],
         initial_cfg: LaunchConfig | None = None,
+        supported_stages: set[int] | None = None,
     ) -> None:
         super().__init__()
         self._bridge = bridge
         self._run_stages_fn = run_stages_fn
         self._initial_cfg = initial_cfg
+        self._supported_stages = supported_stages
         self._worker: threading.Thread | None = None
         self._log_handler: TuiLogHandler | None = None
 
@@ -104,7 +106,7 @@ class ButterflyApp(App):
         """Wire bridge callback, install log handler, push launch screen."""
         self._wire_bridge()
         self._install_log_handler()
-        self.push_screen(LaunchScreen(initial_cfg=self._initial_cfg))
+        self.push_screen(LaunchScreen(initial_cfg=self._initial_cfg, supported_stages=self._supported_stages))
 
     def on_unmount(self) -> None:
         """Ensure worker is unblocked when app shuts down."""
@@ -124,12 +126,22 @@ class ButterflyApp(App):
         def _notify_prompt(req: PromptRequest) -> None:
             # Runs inside event loop already (called via call_from_thread in request_prompt)
             screen = app.screen
-            if isinstance(screen, DashboardScreen):
+            if isinstance(screen, (DashboardScreen, GattShellScreen)):
                 screen.show_prompt_for(req)
-            elif isinstance(screen, GattShellScreen):
-                screen.show_prompt_for(req)
+            else:
+                # Modal is on top — find dashboard behind it
+                for s in reversed(app.screen_stack):
+                    if isinstance(s, DashboardScreen):
+                        s.show_prompt_for(req)
+                        break
 
         self._bridge._notify_prompt = _notify_prompt  # type: ignore[method-assign]
+
+        def _find_dashboard() -> DashboardScreen | None:
+            for s in reversed(app.screen_stack):
+                if isinstance(s, DashboardScreen):
+                    return s
+            return None
 
         def _notify_stage_start(stage: int, title: str, passive: bool) -> None:
             # Clear any leftover skip flag so the new stage starts clean.
@@ -137,9 +149,9 @@ class ButterflyApp(App):
 
             def _do() -> None:
                 try:
-                    screen = app.screen
-                    if isinstance(screen, DashboardScreen):
-                        screen.on_stage_started(stage, title, passive)
+                    dash = _find_dashboard()
+                    if dash is not None:
+                        dash.on_stage_started(stage, title, passive)
                 except Exception as exc:
                     logging.getLogger("tui").error("on_stage_started S%s: %s", stage, exc, exc_info=True)
             app.call_from_thread(_do)
@@ -147,9 +159,9 @@ class ButterflyApp(App):
         def _notify_stage_finish(stage: int, skipped: bool, error: bool) -> None:
             def _do() -> None:
                 try:
-                    screen = app.screen
-                    if isinstance(screen, DashboardScreen):
-                        screen.on_stage_finished(stage, skipped, error)
+                    dash = _find_dashboard()
+                    if dash is not None:
+                        dash.on_stage_finished(stage, skipped, error)
                 except Exception as exc:
                     logging.getLogger("tui").error("on_stage_finished S%s: %s", stage, exc, exc_info=True)
             app.call_from_thread(_do)
@@ -157,9 +169,9 @@ class ButterflyApp(App):
         def _notify_target_found(target: Any) -> None:
             def _do() -> None:
                 try:
-                    screen = app.screen
-                    if isinstance(screen, DashboardScreen):
-                        screen.on_target_found(target)
+                    dash = _find_dashboard()
+                    if dash is not None:
+                        dash.on_target_found(target)
                 except Exception as exc:
                     logging.getLogger("tui").error("on_target_found: %s", exc, exc_info=True)
             app.call_from_thread(_do)
@@ -167,9 +179,9 @@ class ButterflyApp(App):
         def _notify_scan_status(addr: str, stage_label: str) -> None:
             def _do() -> None:
                 try:
-                    screen = app.screen
-                    if isinstance(screen, DashboardScreen):
-                        screen.on_scan_status(addr, stage_label)
+                    dash = _find_dashboard()
+                    if dash is not None:
+                        dash.on_scan_status(addr, stage_label)
                 except Exception as exc:
                     logging.getLogger("tui").error("on_scan_status: %s", exc)
             app.call_from_thread(_do)
@@ -177,9 +189,9 @@ class ButterflyApp(App):
         def _notify_finding(addr: str, n: int) -> None:
             def _do() -> None:
                 try:
-                    screen = app.screen
-                    if isinstance(screen, DashboardScreen):
-                        screen.on_finding(addr, n)
+                    dash = _find_dashboard()
+                    if dash is not None:
+                        dash.on_finding(addr, n)
                 except Exception as exc:
                     logging.getLogger("tui").error("on_finding: %s", exc)
             app.call_from_thread(_do)

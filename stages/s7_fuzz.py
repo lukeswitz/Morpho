@@ -27,7 +27,9 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from whad.device import WhadDevice
@@ -98,6 +100,7 @@ def run(
     target: Target,
     engagement_id: str,
     prepped_handles: list[int] | None = None,
+    cancel: Callable[[], bool] | None = None,
 ) -> list[int]:
     """Run the GATT fuzz stage. Returns the writable handles discovered (may be empty)."""
     if not _cli_available():
@@ -132,16 +135,14 @@ def run(
                 f"| wble-central profile"
             )
             log.debug(f"[S7] Profile cmd: {cmd_profile}")
-            result = subprocess.run(
-                cmd_profile,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=PROFILE_TIMEOUT,
-            )
-            profile_stdout = result.stdout
-            if result.stderr.strip():
-                log.debug(f"[S7] Profile stderr: {result.stderr.strip()[:160]}")
+            result = _run_cancellable(cmd_profile, PROFILE_TIMEOUT, cancel)
+            if result is None:
+                log.info("[S7] Skip requested — aborting profile.")
+                _reopen_dongle(dongle)
+                return []
+            profile_stdout, profile_stderr, _ = result
+            if profile_stderr.strip():
+                log.debug(f"[S7] Profile stderr: {profile_stderr.strip()[:160]}")
         except subprocess.TimeoutExpired:
             log.warning(f"[S7] Profile timed out after {PROFILE_TIMEOUT}s — skipping S7.")
             _reopen_dongle(dongle)
@@ -181,6 +182,7 @@ def run(
     fuzz_stderr = ""
     fuzz_rc = -1
     crash_detected = False
+    fuzz_cancelled = False
 
     try:
         cmd_fuzz = (
@@ -188,16 +190,12 @@ def run(
             f"| wble-central --file {script_path}"
         )
         log.debug(f"[S7] Fuzz cmd: {cmd_fuzz}")
-        result = subprocess.run(
-            cmd_fuzz,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=FUZZ_TIMEOUT,
-        )
-        fuzz_stdout = result.stdout
-        fuzz_stderr = result.stderr
-        fuzz_rc = result.returncode
+        result = _run_cancellable(cmd_fuzz, FUZZ_TIMEOUT, cancel)
+        if result is None:
+            log.info("[S7] Skip requested — aborting fuzz.")
+            fuzz_cancelled = True
+        else:
+            fuzz_stdout, fuzz_stderr, fuzz_rc = result
     except subprocess.TimeoutExpired:
         log.warning(
             f"[S7] Fuzz timed out after {FUZZ_TIMEOUT}s — "
@@ -208,6 +206,9 @@ def run(
         log.error(f"[S7] Fuzz subprocess error: {type(exc).__name__}: {exc}")
     finally:
         _reopen_dongle(dongle)
+
+    if fuzz_cancelled:
+        return []
 
     if fuzz_stderr.strip():
         log.debug(f"[S7] Fuzz stderr: {fuzz_stderr.strip()[:200]}")
@@ -393,6 +394,61 @@ def _parse_fuzz_output(stdout: str, expected_writes: int) -> tuple[int, int]:
     elif writes_sent == 0 and error_count == 0 and stdout.strip():
         writes_sent = expected_writes
     return writes_sent, error_count
+
+
+def _run_cancellable(
+    cmd: str,
+    timeout: float,
+    cancel: Callable[[], bool] | None,
+) -> tuple[str, str, int] | None:
+    """Run a shell command with polling and cancellation support.
+
+    Returns (stdout, stderr, returncode) on completion.
+    Returns None if cancel() fires — caller should treat as skip-requested.
+    Raises subprocess.TimeoutExpired on timeout (same as subprocess.run).
+    Background reader threads prevent pipe-buffer deadlock on large outputs.
+    """
+    stdout_buf: list[str] = []
+    stderr_buf: list[str] = []
+
+    proc = subprocess.Popen(
+        cmd, shell=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    t_out = threading.Thread(target=lambda: stdout_buf.append(proc.stdout.read()), daemon=True)
+    t_err = threading.Thread(target=lambda: stderr_buf.append(proc.stderr.read()), daemon=True)
+    t_out.start()
+    t_err.start()
+
+    deadline = time.time() + timeout
+    while proc.poll() is None:
+        time.sleep(0.5)
+        if cancel is not None and cancel():
+            proc.kill()
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                pass
+            t_out.join(timeout=1.0)
+            t_err.join(timeout=1.0)
+            return None
+        if time.time() >= deadline:
+            proc.kill()
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                pass
+            t_out.join(timeout=1.0)
+            t_err.join(timeout=1.0)
+            raise subprocess.TimeoutExpired(cmd, timeout)
+
+    t_out.join()
+    t_err.join()
+    return (
+        stdout_buf[0] if stdout_buf else "",
+        stderr_buf[0] if stderr_buf else "",
+        proc.returncode if proc.returncode is not None else -1,
+    )
 
 
 def _reopen_dongle(dongle: WhadDongle) -> None:

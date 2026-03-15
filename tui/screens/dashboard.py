@@ -47,6 +47,7 @@ class DashboardScreen(Screen):
         yield Footer()
 
     def action_toggle_log(self) -> None:
+        """Ctrl+L: show/hide the log pane (target table always stays visible)."""
         pane = self.query_one("#log-pane", RichLog)
         pane.display = not pane.display
 
@@ -83,13 +84,16 @@ class DashboardScreen(Screen):
 
     # ── Methods called by ButterflyApp message handlers ────────────────────────
 
+    _NON_BLE_STAGES = frozenset({10, 11, 12, 14, 15, 16, 17, 18, 19, 21, 22, 23})
+
     def on_stage_started(self, stage: int, title: str, passive: bool) -> None:
-        """Mark stage as RUNNING; write a single clean header line to log pane."""
         from rich.markup import escape
         self.query_one(StageStatusWidget).set_stage_state(stage, StageState.RUNNING)
         pane = self.query_one("#log-pane", RichLog)
         tag_markup = "[#40c060]PASSIVE[/#40c060]" if passive else "[bold #e04040]ACTIVE[/bold #e04040]"
         pane.write(f"[bold #2080b0]S{stage:02d}[/bold #2080b0] {tag_markup} [bold white]{escape(title)}[/bold white]")
+        if stage in self._NON_BLE_STAGES:
+            pane.display = True
 
     def on_stage_finished(self, stage: int, skipped: bool, error: bool) -> None:
         """Update stage icon to COMPLETE, SKIPPED, or ERROR."""
@@ -132,7 +136,8 @@ class DashboardScreen(Screen):
         Called from ButterflyApp when PromptReady message arrives.
         Auto-shows the log pane so the user sees any menu options logged above.
         """
-        self.query_one("#log-pane", RichLog).display = True
+        pane = self.query_one("#log-pane", RichLog)
+        pane.scroll_end(animate=False)
         if req.kind == PromptKind.ACTIVE_GATE:
             self.app.push_screen(ActiveGateModal(req))
         elif req.kind == PromptKind.SELECT_TARGETS:

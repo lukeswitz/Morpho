@@ -21,6 +21,7 @@ class GattShellScreen(Screen):
     BINDINGS = [
         ("ctrl+c", "exit_shell", "Exit shell"),
         ("ctrl+l", "clear_log", "Clear"),
+        ("ctrl+x", "skip_stage", "Skip stage"),
     ]
 
     def __init__(self, addr: str, bridge: "PromptBridge") -> None:
@@ -132,3 +133,7 @@ class GattShellScreen(Screen):
             self.query_one("#shell-log", RichLog).clear()
         except Exception:
             pass
+
+    def action_skip_stage(self) -> None:
+        """Ctrl+X: skip the current stage (exits shell via bridge skip signal)."""
+        self.app.skip_current_stage()

@@ -372,7 +372,7 @@ def _hardware_banner(hw: HardwareMap) -> None:
 def run_stages(cfg: "LaunchConfig", bridge: "PromptBridge") -> None:
     """
     Execute the stage loop. Called either directly (--plain mode) or from
-    ButterflyApp's worker thread (TUI mode).
+    Ruby Waves's worker thread (TUI mode).
     """
     import os as _os
 
@@ -459,8 +459,7 @@ def run_stages(cfg: "LaunchConfig", bridge: "PromptBridge") -> None:
             stages_requested = _stages_from_hardware(hw)
             _print_auto_stages(stages_requested)
         else:
-            stages_requested = cfg.stages
-            _warn_unsupported_stages(stages_requested, hw)
+            stages_requested = _filter_unsupported_stages(cfg.stages, hw)
 
         # 6. Shared data structures
         targets = []
@@ -592,13 +591,20 @@ def run_stages(cfg: "LaunchConfig", bridge: "PromptBridge") -> None:
                     ):
                         from stages import s5_interact
                         for t in gatt_picks:
+                            if bridge.is_skip_requested():
+                                break
                             scan_status_update(t.bd_address, "S05")
-                            handles, profile = s5_interact.run(hw.ble_dongle, t, eng_id)
+                            handles, profile = s5_interact.run(
+                                hw.ble_dongle, t, eng_id,
+                                cancel=bridge.is_skip_requested,
+                            )
                             if handles:
                                 gatt_writable[t.bd_address] = handles
                             if profile:
                                 gatt_profiles[t.bd_address] = profile
                             add_finding(t.bd_address, len(handles) + len(profile))
+                            if bridge.is_skip_requested():
+                                break
                             if profile and t.connectable:
                                 log.info(
                                     f"[S5] {t.bd_address}: {len(profile)} char(s) found. "
@@ -613,6 +619,9 @@ def run_stages(cfg: "LaunchConfig", bridge: "PromptBridge") -> None:
                                     s5_interact.shell(
                                         hw.ble_dongle, t, profile or [], eng_id
                                     )
+                        if bridge.is_skip_requested():
+                            bridge.clear_skip()
+                            log.info("[S5] Stage skipped by operator.")
                 else:
                     log.info("Stage 5 skipped by operator.")
             else:
@@ -644,9 +653,15 @@ def run_stages(cfg: "LaunchConfig", bridge: "PromptBridge") -> None:
                         f"({proxy_picks[0].name or proxy_picks[0].device_class}). "
                         "Requires two RF interfaces. Authorized targets only.",
                     ):
-                        s6_proxy.run(hw.ble_dongle, proxy_picks[0], eng_id)
+                        s6_proxy.run(
+                            hw.ble_dongle, proxy_picks[0], eng_id,
+                            cancel=bridge.is_skip_requested,
+                        )
                 else:
                     log.info("Stage 6 skipped by operator.")
+                if bridge.is_skip_requested():
+                    bridge.clear_skip()
+                    log.info("[S6] Stage skipped by operator.")
             else:
                 log.info("Stage 6 skipped: no connectable targets.")
 
@@ -693,15 +708,21 @@ def run_stages(cfg: "LaunchConfig", bridge: "PromptBridge") -> None:
                     ):
                         from stages import s7_fuzz
                         for t in fuzz_picks:
+                            if bridge.is_skip_requested():
+                                break
                             scan_status_update(t.bd_address, "S07")
                             found = s7_fuzz.run(
                                 hw.ble_dongle, t, eng_id,
                                 prepped_handles=gatt_writable.get(t.bd_address),
+                                cancel=bridge.is_skip_requested,
                             )
                             if found:
                                 add_finding(t.bd_address, len(found))
                                 if t.bd_address not in gatt_writable:
                                     gatt_writable[t.bd_address] = found
+                        if bridge.is_skip_requested():
+                            bridge.clear_skip()
+                            log.info("[S7] Stage skipped by operator.")
                 else:
                     log.info("Stage 7 skipped by operator.")
             else:
@@ -730,12 +751,19 @@ def run_stages(cfg: "LaunchConfig", bridge: "PromptBridge") -> None:
                     ).strip()
                     poc_name = _name_input if _name_input else "BLE-PoC"
                     for t in poc_targets:
+                        if bridge.is_skip_requested():
+                            break
                         scan_status_update(t.bd_address, "S08")
-                        s8_poc.run(
+                        n_found = s8_poc.run(
                             hw.ble_dongle, t, eng_id,
                             gatt_profiles.get(t.bd_address, []),
                             poc_name=poc_name,
                         )
+                        if n_found:
+                            add_finding(t.bd_address, n_found)
+                    if bridge.is_skip_requested():
+                        bridge.clear_skip()
+                        log.info("[S08] Stage skipped by operator.")
             else:
                 log.info("Stage 8 skipped: no writable targets identified by S5 or S7.")
 
@@ -760,11 +788,16 @@ def run_stages(cfg: "LaunchConfig", bridge: "PromptBridge") -> None:
                         f"({inject_picks[0].name or inject_picks[0].device_class}). "
                         f"Mode: {mode}. Authorized targets only.",
                     ):
+                        scan_status_update(inject_picks[0].bd_address, "S09")
                         s9_inject.run(
                             hw.ble_dongle, inject_picks[0], eng_id, connections, mode
                         )
+                        add_finding(inject_picks[0].bd_address, 1)
                 else:
                     log.info("Stage 9 skipped by operator.")
+                if bridge.is_skip_requested():
+                    bridge.clear_skip()
+                    log.info("[S09] Stage skipped by operator.")
             else:
                 log.info("Stage 9 skipped: no connectable targets.")
 
@@ -921,10 +954,19 @@ def run_stages(cfg: "LaunchConfig", bridge: "PromptBridge") -> None:
                 ):
                     from stages import s13_pairing
                     for idx, t in enumerate(pairing_targets):
+                        if bridge.is_skip_requested():
+                            break
                         scan_status_update(t.bd_address, "S13")
-                        s13_pairing.run(hw.ble_dongle, t, eng_id)
+                        n_found = s13_pairing.run(hw.ble_dongle, t, eng_id)
+                        if n_found:
+                            add_finding(t.bd_address, n_found)
+                        if bridge.is_skip_requested():
+                            break
                         if idx < len(pairing_targets) - 1:
-                            time.sleep(3.0)  # dongle recovery between targets
+                            time.sleep(3.0)
+                    if bridge.is_skip_requested():
+                        bridge.clear_skip()
+                        log.info("[S13] Stage skipped by operator.")
             else:
                 log.info("Stage 13 skipped: no connectable targets.")
 
@@ -948,10 +990,12 @@ def run_stages(cfg: "LaunchConfig", bridge: "PromptBridge") -> None:
                         (t for t in targets if t.bd_address == conn.peripheral_addr), None
                     )
                     profile = gatt_profiles.get(conn.peripheral_addr)
+                    scan_status_update(conn.peripheral_addr, "S20")
                     success = s20_hijack.run(
                         hw.ble_dongle, conn, target_obj, eng_id, profile
                     )
                     if success:
+                        add_finding(conn.peripheral_addr, 1)
                         break
             else:
                 log.info("Stage 20 skipped by operator.")
@@ -1051,9 +1095,61 @@ def main() -> None:
             _os.dup2(_saved1, 1); _os.dup2(_saved2, 2)
             _os.close(_devnull); _os.close(_saved1); _os.close(_saved2)
 
+        supported = _offline_supported_stages(
+            config.INTERFACE,
+            config.ESB_INTERFACE,
+            config.PHY_SUBGHZ_INTERFACE,
+            config.UBERTOOTH_INTERFACE,
+        )
         from tui.bridge import PromptBridge
         from tui.app import ButterflyApp
-        ButterflyApp(PromptBridge(), run_stages, initial_cfg=build_cfg_from_args(args)).run()
+        ButterflyApp(
+            PromptBridge(), run_stages,
+            initial_cfg=build_cfg_from_args(args),
+            supported_stages=supported,
+        ).run()
+
+
+def _offline_supported_stages(
+    ble_interface: str,
+    esb_interface: str | None,
+    phy_interface: str | None,
+    ubertooth_interface: str | None,
+) -> set[int]:
+    """Compute all stages the detected hardware is capable of running.
+
+    Uses import/CLI checks only — no WHAD devices are opened. Called before
+    the TUI launches so stage checkboxes can be disabled for unsupported hardware.
+    """
+    # Auto-detect secondary devices (mirrors detect_hardware logic)
+    if esb_interface is None or phy_interface is None or ubertooth_interface is None:
+        for name, dtype in WhadDongle.enumerate_devices():
+            dtype_lo = dtype.lower()
+            if esb_interface is None and dtype_lo == "rfstorm":
+                esb_interface = name
+            if phy_interface is None and dtype_lo == "yardstickone":
+                phy_interface = name
+            if ubertooth_interface is None and dtype_lo in ("ubertoothone", "ubertooth"):
+                ubertooth_interface = name
+
+    ble_caps = WhadDongle.probe_offline(ble_interface)
+    esb_caps = WhadDongle.probe_offline(esb_interface) if esb_interface else None
+
+    # Minimal proxy — _filter_unsupported_stages and _stages_from_hardware
+    # only read .caps and check for None; they never call dongle methods.
+    class _Cap:
+        def __init__(self, caps: DongleCaps) -> None:
+            self.caps = caps
+
+    fake_hw = HardwareMap(
+        ble_dongle=_Cap(ble_caps),                                    # type: ignore[arg-type]
+        esb_dongle=_Cap(esb_caps) if esb_caps else None,              # type: ignore[arg-type]
+        phy_dongle=_Cap(DongleCaps()) if phy_interface else None,     # type: ignore[arg-type]
+        ubertooth_dongle=_Cap(DongleCaps()) if ubertooth_interface else None,  # type: ignore[arg-type]
+    )
+    # Filter the complete stage set to what this hardware can actually run.
+    all_stages: set[int] = set(range(1, 24))
+    return _filter_unsupported_stages(all_stages, fake_hw)  # type: ignore[arg-type]
 
 
 def _stages_from_hardware(hw: HardwareMap) -> set[int]:
@@ -1062,7 +1158,7 @@ def _stages_from_hardware(hw: HardwareMap) -> set[int]:
     stages: set[int] = set()
     if caps.can_scan:           stages.add(1)               # passive BLE scan
     if caps.can_sniff:          stages.add(2)               # connection intelligence
-    if caps.can_peripheral:     stages.add(3)               # identity clone
+    # S3 (identity clone) transmits as a rogue peripheral — always opt-in
     # S4 (reactive jam) and S20 (hijack) are destructive — always opt-in
     if caps.can_central:        stages.update({5, 7, 8, 13})  # GATT enum/fuzz/PoC, SMP
     # S6 (MITM proxy) requires a second RF interface — always opt-in
@@ -1105,58 +1201,55 @@ def _print_auto_stages(stages: set[int]) -> None:
     log.info(f"  Auto-selected stages : {nums}")
 
 
-def _warn_unsupported_stages(stages: set[int], hw: HardwareMap) -> None:
-    """Log a warning for each explicitly requested stage the hardware cannot support."""
+def _filter_unsupported_stages(stages: set[int], hw: HardwareMap) -> set[int]:
+    """Remove stages the current hardware cannot support.
+
+    Logs a warning for each removed stage and returns the filtered set.
+    """
     caps = hw.ble_dongle.caps if hw.ble_dongle else DongleCaps()
     _esb_caps = hw.esb_dongle.caps if hw.esb_dongle else caps
 
     _STAGE_CAP: dict[int, tuple[str, str]] = {
-        1:  ("can_scan",        "BLE Scanner"),
-        2:  ("can_sniff",       "BLE Sniffer"),
-        3:  ("can_peripheral",  "BLE Peripheral"),
-        4:  ("can_reactive_jam","ReactiveJam"),
-        5:  ("can_central",     "BLE Central"),
-        6:  ("can_central",     "BLE Central"),
-        7:  ("can_central",     "BLE Central"),
-        8:  ("can_central",     "BLE Central"),
-        9:  ("can_central",     "BLE Central"),
-        10: ("can_unifying",    "Unifying CLI tools"),
-        11: ("can_zigbee",      "ZigBee module"),
-        12: ("can_phy",         "PHY module"),
-        13: ("can_central",     "BLE Central"),
-        14: ("can_esb",         "ESB module"),
-        15: ("can_lorawan",     "LoRaWAN module"),
-        18: ("can_esb",         "ESB module (PRX/PTX)"),
-        19: ("can_unifying",    "Unifying module"),
+        1:  ("can_scan",         "BLE Scanner"),
+        2:  ("can_sniff",        "BLE Sniffer"),
+        3:  ("can_peripheral",   "BLE Peripheral"),
+        4:  ("can_reactive_jam", "ReactiveJam"),
+        5:  ("can_central",      "BLE Central"),
+        6:  ("can_central",      "BLE Central"),
+        7:  ("can_central",      "BLE Central"),
+        8:  ("can_central",      "BLE Central"),
+        9:  ("can_central",      "BLE Central"),
+        10: ("can_unifying",     "Unifying CLI tools"),
+        11: ("can_zigbee",       "ZigBee module"),
+        12: ("can_phy",          "PHY module"),
+        13: ("can_central",      "BLE Central"),
+        14: ("can_esb",          "ESB module"),
+        15: ("can_lorawan",      "LoRaWAN module"),
+        16: ("can_central",      "BLE Central"),
+        18: ("can_esb",          "ESB module (PRX/PTX)"),
+        19: ("can_unifying",     "Unifying module"),
         20: ("can_reactive_jam", "ReactiveJam (BLE Hijacker)"),
-        22: ("can_zigbee",      "ZigBee/dot15d4 module (RF4CE)"),
-        23: ("can_zigbee",      "dot15d4 module (raw 802.15.4)"),
+        22: ("can_zigbee",       "ZigBee/dot15d4 module (RF4CE)"),
+        23: ("can_zigbee",       "dot15d4 module (raw 802.15.4)"),
     }
+    filtered = set(stages)
     for s in sorted(stages):
         if s == 17:
             if hw.phy_dongle is None:
-                log.warning(
-                    "Stage 17 requires a YardStickOne (phy_dongle=None) — "
-                    "stage will be skipped. Connect YardStickOne or use --phy-interface."
-                )
+                filtered.discard(17)
             continue
-        if s in (18, 19):
-            if hw.esb_dongle is None:
-                log.warning(
-                    f"Stage {s} works best with an RfStorm dongle (esb_dongle=None) — "
-                    "will fall back to BLE dongle but synchronize() may fail."
-                )
+        if s == 21:
+            if hw.ubertooth_dongle is None and not _hci_available():
+                filtered.discard(21)
             continue
         if s not in _STAGE_CAP:
             continue
         cap_name, cap_label = _STAGE_CAP[s]
         # ESB/Unifying stages can use either primary or ESB dongle
-        check_caps = _esb_caps if s in (10, 14) else caps
+        check_caps = _esb_caps if s in (10, 14, 18, 19) else caps
         if not getattr(check_caps, cap_name, True):
-            log.warning(
-                f"Stage {s} requires {cap_label} ({cap_name}=False) — "
-                "stage will skip itself at runtime."
-            )
+            filtered.discard(s)
+    return filtered
 
 
 def _ask_inject_mode() -> str:

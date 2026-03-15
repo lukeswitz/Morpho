@@ -145,6 +145,21 @@ class WhadDongle:
         return dongle
 
     @classmethod
+    def probe_offline(cls, interface: str) -> DongleCaps:
+        """Probe capabilities via import and CLI checks only — no device open.
+
+        Safe to call before the TUI launches. probe_caps() never accesses
+        self.device, so a dummy instance with only interface/caps/_verbose
+        set is sufficient.
+        """
+        dummy = cls.__new__(cls)
+        dummy.interface = interface
+        dummy.caps = DongleCaps()
+        dummy._verbose = False
+        dummy.probe_caps()
+        return dummy.caps
+
+    @classmethod
     def enumerate(cls) -> list[str]:
         """Return interface names for all connected WHAD devices."""
         return [name for name, _ in cls.enumerate_devices()]

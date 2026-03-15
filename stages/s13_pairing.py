@@ -163,6 +163,7 @@ def run(
 
     _record_findings(target, engagement_id, accepted_modes, keys_captured)
     _print_summary(target, accepted_modes, keys_captured)
+    return len(accepted_modes)
 
 
 # ── Key extraction ────────────────────────────────────────────────────────────
