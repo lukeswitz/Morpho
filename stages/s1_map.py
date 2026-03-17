@@ -260,12 +260,6 @@ def _upsert_discovered_device(
     now,
     target_callback=None,
 ) -> None:
-    """Merge a discover_devices() device object into the shared targets dict.
-
-    Called from the discover_devices path only; targets dict is NOT shared with
-    the Ubertooth thread at this point (ubertooth thread uses _lock), so callers
-    must hold _lock before calling this function.
-    """
     try:
         info = _extract_device_info(dev)
     except Exception as exc:

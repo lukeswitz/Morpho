@@ -925,7 +925,7 @@ def _discover_with_timeout(periph_dev, addr: str) -> bool:
 
     def _do() -> None:
         try:
-            periph_dev.discover()
+            periph_dev.discover(include_values=True)
         except Exception as exc:
             exc_holder.append(exc)
         finally:
@@ -1249,17 +1249,21 @@ def shell(
 
         elif cmd == "help":
             shell_write("  Commands:")
-            shell_write("    read   <h>               — read value (hex + text)")
-            shell_write("    write  <h> <hex>         — write with response")
-            shell_write("    wnr    <h> <hex>         — write without response")
-            shell_write("    sub    <h>               — subscribe notifications")
-            shell_write("    unsub  <h>               — unsubscribe")
-            shell_write("    notify                   — show buffered notifications")
-            shell_write("    info   [h]               — profile table (or single char)")
-            shell_write("    connupdate <ms> [lat] [to_ms] — request LL conn param update")
-            shell_write("    whack                    — oscillate params to stress timing")
-            shell_write("    help                     — this message")
-            shell_write("    quit / exit              — disconnect and return")
+            shell_write("    read     <h>                         — read value (hex + text)")
+            shell_write("    write    <h> <hex>                   — write with response")
+            shell_write("    wnr      <h> <hex>                   — write without response")
+            shell_write("    sub      <h>                         — subscribe notifications")
+            shell_write("    unsub    <h>                         — unsubscribe")
+            shell_write("    notify                               — show buffered notifications")
+            shell_write("    info     [h]                         — profile table (or single char)")
+            shell_write("    services                             — grouped service/char tree")
+            shell_write("    discover                             — re-enumerate GATT profile")
+            shell_write("    mtu      <value>                     — negotiate new ATT MTU")
+            shell_write("    encrypt                              — request LL encryption")
+            shell_write("    pair     [lesc|legacy] [mitm|nomitm] [bond|nobond]")
+            shell_write("    pdu      <hex_bytes>                 — send raw LL PDU")
+            shell_write("    help                                 — this message")
+            shell_write("    quit / exit                          — disconnect and return")
 
         elif cmd == "info":
             if len(parts) > 1:
@@ -1377,63 +1381,204 @@ def shell(
                     shell_write(f"  [{label}]  hex={entry['hex']}  "
                                 f"text={entry.get('text') or '(binary)'}")
 
-        elif cmd == "connupdate":
+        elif cmd == "services":
+            try:
+                shell_write(f"  {'SVC / CHAR UUID':<38}  {'NAME':<22}  HANDLE  PROPS")
+                shell_write("  " + "─" * 76)
+                for svc in periph_dev.services():
+                    svc_uuid = str(getattr(svc, "uuid", "?"))
+                    svc_name = UUID_NAMES.get(_uuid_to_int(svc_uuid), "")
+                    svc_label = svc_uuid[:38]
+                    name_col = f"({svc_name})" if svc_name else ""
+                    shell_write(f"  {svc_label:<38}  {name_col}")
+                    for char in (getattr(svc, "characteristics", None) or []):
+                        c_uuid = str(getattr(char, "uuid", "?"))
+                        c_name = UUID_NAMES.get(_uuid_to_int(c_uuid), "")
+                        c_vhandle = getattr(char, "value_handle", "?")
+                        c_props = _extract_properties(char)
+                        props_str = ",".join(c_props)[:24]
+                        shell_write(
+                            f"    {c_uuid[:36]:<36}  {c_name[:22]:<22}  "
+                            f"h={c_vhandle:<4}  {props_str}"
+                        )
+            except Exception as exc:
+                shell_write(f"  [ERR] services — {type(exc).__name__}: {exc}")
+
+        elif cmd == "discover":
+            shell_write("  Re-enumerating GATT profile ...")
+            _disc_done = threading.Event()
+            _disc_exc: list[Exception] = []
+
+            def _do_disc() -> None:
+                try:
+                    periph_dev.discover(include_values=True)
+                except Exception as e:
+                    _disc_exc.append(e)
+                finally:
+                    _disc_done.set()
+
+            threading.Thread(target=_do_disc, daemon=True).start()
+            if not _disc_done.wait(timeout=GATT_DISCOVER_TIMEOUT):
+                shell_write(f"  [WARN] discover timed out after {GATT_DISCOVER_TIMEOUT}s")
+            elif _disc_exc:
+                shell_write(
+                    f"  [ERR] discover — {type(_disc_exc[0]).__name__}: {_disc_exc[0]}"
+                )
+            else:
+                profile.clear()
+                try:
+                    for svc in periph_dev.services():
+                        for char in (getattr(svc, "characteristics", None) or []):
+                            c_uuid = str(getattr(char, "uuid", ""))
+                            c_handle = int(getattr(char, "handle", 0))
+                            c_vhandle = int(getattr(char, "value_handle", c_handle))
+                            c_props = _extract_properties(char)
+                            entry: dict = {
+                                "uuid": c_uuid,
+                                "uuid_name": UUID_NAMES.get(_uuid_to_int(c_uuid), ""),
+                                "handle": c_handle,
+                                "value_handle": c_vhandle,
+                                "properties": c_props,
+                                "requires_auth": False,
+                                "value_text": None,
+                                "value_hex": None,
+                            }
+                            profile.append(entry)
+                            by_handle[c_vhandle] = entry
+                except Exception as exc:
+                    shell_write(f"  [WARN] profile rebuild partial: {exc}")
+                shell_write(f"  [OK] discover complete — {len(profile)} characteristic(s)")
+                _print_profile_table(profile, by_handle)
+
+        elif cmd == "mtu":
             if len(parts) < 2:
-                shell_write("  Usage: connupdate <interval_ms> [latency] [timeout_ms]")
-                shell_write("  Example: connupdate 7.5  /  connupdate 4000 0 8000")
+                try:
+                    current = periph_dev.get_mtu()
+                    shell_write(f"  Current MTU: {current}")
+                except Exception:
+                    shell_write("  Usage: mtu <value>  (e.g. mtu 247)")
                 continue
             try:
-                interval_ms  = float(parts[1])
-                latency      = int(parts[2]) if len(parts) > 2 else 0
-                timeout_ms   = int(parts[3]) if len(parts) > 3 else max(1000, int(interval_ms * 10))
-                interval_u   = int(interval_ms / 1.25)
-                timeout_u    = int(timeout_ms / 10)
-                updated = False
-                for method_name in (
-                    "update_connection_parameters",
-                    "set_connection_parameters",
-                    "connection_update",
-                    "send_connection_update",
-                ):
-                    fn = getattr(central, method_name, None)
-                    if fn is None:
-                        continue
-                    try:
-                        fn(interval_u, interval_u, latency, timeout_u)
-                        updated = True
-                        shell_write(
-                            f"  [OK] connupdate — interval={interval_ms}ms  "
-                            f"latency={latency}  timeout={timeout_ms}ms"
-                        )
-                        break
-                    except Exception as exc:
-                        log.debug(f"  {method_name}() failed: {exc}")
-                if not updated:
-                    shell_write("  [ERR] connupdate: no connection update method in WHAD Central")
-            except (ValueError, IndexError) as exc:
-                shell_write(f"  [ERR] connupdate: bad args — {exc}")
+                new_mtu = int(parts[1])
+                periph_dev.set_mtu(new_mtu)
+                negotiated = periph_dev.get_mtu()
+                shell_write(f"  [OK] MTU requested={new_mtu}  negotiated={negotiated}")
+            except Exception as exc:
+                shell_write(f"  [ERR] mtu — {type(exc).__name__}: {exc}")
 
-        elif cmd == "whack":
-            shell_write("  whack: oscillating connection parameters (5 rounds) ...")
-            whack_fn = None
-            for mname in ("update_connection_parameters", "set_connection_parameters"):
-                if getattr(central, mname, None):
-                    whack_fn = getattr(central, mname)
-                    break
-            if whack_fn is None:
-                shell_write("  [ERR] whack: no connection update method available.")
+        elif cmd == "encrypt":
+            shell_write("  Requesting LL encryption ...")
+            try:
+                periph_dev.start_encryption()
+                shell_write("  [OK] Encryption accepted — link is now encrypted")
+                insert_finding(Finding(
+                    type="gatt_shell_encryption_accepted",
+                    severity="medium",
+                    target_addr=addr,
+                    description=(
+                        f"Device {addr} ({target.name or 'unnamed'}) accepted "
+                        "LL encryption without prior pairing during interactive "
+                        "GATT shell session."
+                    ),
+                    remediation=(
+                        "Require SMP pairing with MITM protection before accepting "
+                        "LL_START_ENC_REQ. Unauthenticated encryption provides "
+                        "confidentiality but no identity verification."
+                    ),
+                    evidence={"target_addr": addr, "method": "start_encryption()"},
+                    engagement_id=engagement_id,
+                ))
+            except ConnectionLostException:
+                shell_write("  [!] Device terminated connection on encrypt request")
+                insert_finding(Finding(
+                    type="gatt_shell_encrypt_terminate",
+                    severity="high",
+                    target_addr=addr,
+                    description=(
+                        f"Device {addr} ({target.name or 'unnamed'}) terminated the BLE "
+                        "connection when LL encryption was requested instead of "
+                        "rejecting gracefully — indicates a firmware fault or missing "
+                        "error handler."
+                    ),
+                    remediation=(
+                        "Handle LL_START_ENC_REQ gracefully — reject with LL_REJECT_IND "
+                        "if encryption is not supported rather than terminating the link."
+                    ),
+                    evidence={"target_addr": addr, "method": "start_encryption()"},
+                    engagement_id=engagement_id,
+                ))
+                break
+            except Exception as exc:
+                shell_write(f"  [ERR] encrypt — {type(exc).__name__}: {exc}")
+
+        elif cmd == "pair":
+            args_lower = {p.lower() for p in parts[1:]}
+            lesc    = "legacy" not in args_lower
+            mitm    = "mitm" in args_lower and "nomitm" not in args_lower
+            bonding = "bond" in args_lower and "nobond" not in args_lower
+            try:
+                from whad.ble.stack.smp.parameters import Pairing as _Pairing
+            except ImportError:
+                shell_write("  [ERR] pair: whad.ble.stack.smp.parameters not available")
+                continue
+            mode_label = (
+                f"{'LESC' if lesc else 'Legacy'} "
+                f"{'MITM' if mitm else 'JustWorks'} "
+                f"{'bonding' if bonding else 'no-bond'}"
+            )
+            shell_write(f"  Pairing: {mode_label} ...")
+            _pair_result: list[bool] = [False]
+            _pair_done = threading.Event()
+
+            def _do_pair() -> None:
+                try:
+                    _pair_result[0] = periph_dev.pairing(
+                        pairing=_Pairing(lesc=lesc, mitm=mitm, bonding=bonding)
+                    )
+                except Exception as e:
+                    log.debug(f"[shell] pairing() exception: {e}")
+                finally:
+                    _pair_done.set()
+
+            threading.Thread(target=_do_pair, daemon=True).start()
+            _pair_done.wait(timeout=20.0)
+            if _pair_result[0]:
+                shell_write(f"  [OK] Pairing accepted: {mode_label}")
+                shell_write(
+                    "  Tip: run 'discover' to refresh profile — "
+                    "some chars may have unlocked"
+                )
             else:
-                import time as _whack_time
-                for i in range(5):
-                    try:
-                        whack_fn(6, 6, 0, 200)
-                        _whack_time.sleep(0.3)
-                        whack_fn(3200, 3200, 0, 6400)
-                        _whack_time.sleep(0.3)
-                        shell_write(f"  [OK] whack round {i + 1}/5 — device still connected")
-                    except Exception as exc:
-                        shell_write(f"  [ERR] whack round {i + 1}/5 — {exc}")
-                        break
+                shell_write(f"  [ERR] Pairing rejected or timed out ({mode_label})")
+
+        elif cmd == "pdu":
+            if len(parts) < 2:
+                shell_write("  Usage: pdu <hex_bytes>  (e.g. pdu 030000)")
+                continue
+            hex_s = parts[1].replace(":", "").replace(" ", "")
+            try:
+                raw_bytes = bytes.fromhex(hex_s)
+            except ValueError as exc:
+                shell_write(f"  [ERR] bad hex — {exc}")
+                continue
+            try:
+                try:
+                    from scapy.layers.bluetooth4LE import BTLE as _BTLE
+                    pkt = _BTLE(raw_bytes)
+                except ImportError:
+                    pkt = raw_bytes  # type: ignore[assignment]
+                try:
+                    from whad.common.directions import Direction as _Dir
+                    _direction = _Dir.MASTER_TO_SLAVE
+                except ImportError:
+                    _direction = 0
+                central.send_pdu(pkt, conn_handle=0, direction=_direction)
+                preview = hex_s[:32] + ("…" if len(hex_s) > 32 else "")
+                shell_write(
+                    f"  [OK] PDU sent ({len(raw_bytes)} byte(s): {preview})"
+                )
+            except Exception as exc:
+                shell_write(f"  [ERR] pdu — {type(exc).__name__}: {exc}")
 
         elif cmd == "pyshell":
             from core.logger import _bridge as _tui_bridge  # type: ignore[attr-defined]
@@ -1483,7 +1628,7 @@ def _shell_banner(addr: str, profile: list[dict], by_handle: dict[int, dict]) ->
     shell_write("═" * 76)
     shell_write(f"  TARGET  {addr}")
     shell_write(f"  PROFILE {len(profile)} characteristic(s) loaded")
-    shell_write("  read  write  wnr  sub  unsub  notify  info  connupdate  whack  help  quit")
+    shell_write("  read  write  wnr  sub  unsub  notify  info  services  discover  mtu  encrypt  pair  pdu  help  quit")
     shell_write("═" * 76)
     _print_profile_table(profile, by_handle)
 

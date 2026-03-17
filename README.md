@@ -51,19 +51,6 @@ sudo usermod -aG dialout $USER && newgrp dialout
 whadup
 ```
 
-Expected `whadup` output:
-
-```
-- uart0
-  Type: ButteRFly
-- rfstorm0
-  Type: RfStorm
-- yardstickone0
-  Type: YardStickOne
-- ubertooth0
-  Type: UbertoothOne
-```
-
 **Optional data files** — place in repo root for richer device classification:
 
 | File | Source | Purpose |
@@ -184,15 +171,7 @@ Every opt-in stage raises a full-screen confirmation modal before any RF transmi
 
 Stages that require a target present a table sorted by risk score. Accepts: `1,3` (numbers), `all`, `smart` (excludes low-value classes), or `skip`.
 
-### GATT Shell Screen
-
-After Stage 5 enumeration or a Stage 20 hijack, the TUI switches to a dedicated GATT shell screen. In `--plain` mode it runs inline in the terminal.
-
----
-
-## Stage Reference
-
-Stages marked **OPT-IN** are never auto-selected. Enable them with `--opt-in` or `--stages N`.
+## Stages
 
 ### BLE Stages
 
