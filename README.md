@@ -65,7 +65,10 @@ cd Morpho
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# 2. Install WHAD
+# 2. Flash ButteRFly firmware (nRF52840 MDK, one-time)
+# See https://github.com/whad-team/butterfly for flashing instructions
+
+# 3. Install WHAD
 pip install whad
 
 # Or from source for latest fixes
@@ -74,10 +77,10 @@ cd whad-client
 pip install -e .
 cd ..
 
-# 3. Linux — USB permissions (one-time)
+# 4. Linux — USB permissions (one-time)
 sudo usermod -aG dialout $USER && newgrp dialout
 
-# 4. Verify connected hardware
+# 5. Verify connected hardware
 whadup
 ```
 
@@ -100,7 +103,7 @@ Both are optional — classification still works from name patterns and service 
 
 | Device | Interface | Protocols |
 |--------|-----------|-----------|
-| Makerdiary nRF52840 MDK (ButteRFly firmware) | `uart0` | BLE (all modes), ZigBee/802.15.4, ESB scanner |
+| Makerdiary nRF52840 MDK ([ButteRFly firmware](https://github.com/whad-team/butterfly)) | `uart0` | BLE (all modes), ZigBee/802.15.4, ESB scanner |
 | RfStorm (nRF24L01+) | `rfstorm0` | ESB sniffer (all-channel), Logitech Unifying |
 | YARD Stick One | `yardstickone0` | Sub-GHz PHY (300–928 MHz) |
 | Ubertooth One | `ubertooth0` | Passive BLE sniff (supplements S1/S2) |
