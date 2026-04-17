@@ -60,8 +60,13 @@ _STAGE_GROUPS: list[tuple[str, list[tuple[str, str, str, str]]]] = [
     ("LORAWAN  ·  external LoRa radio", [
         ("15", "lorawan recon",            "passive",  ""),
     ]),
-    ("SUB-GHz  ·  yardstickone0", [
+    ("SUB-GHz  ·  yardstickone0 / rfcat", [
         ("17", "sub-ghz phy survey",       "passive*", ""),
+        ("25", "sub-ghz spectrum survey",  "passive",  "[rfcat]"),
+        ("26", "sub-ghz capture+replay",   "active*",  "[rfcat]"),
+    ]),
+    ("2.4 GHz HID  ·  nRF Research Firmware dongle", [
+        ("24", "mousejack hid recon",      "active*",  ""),
     ]),
     ("BLUETOOTH CLASSIC  ·  hci / ubertooth0", [
         ("21", "br/edr scout",             "passive",  ""),
@@ -92,15 +97,15 @@ def _help_text() -> str:
         f"  ╔{eq}╗",
         f"  ║{wave}║",
         f"  ║{'':62}║",
-        f"  ║{'':17}R  U  B  Y     W  A  V  E  S{'':17}║",
+        f"  ║{'M  O  R  P  H  O':^62}║",
         f"  ║{'':62}║",
         f"  ║{wave}║",
         f"  ║{'':62}║",
-        f"  ║   wireless multi-protocol assessment  ·  23 stages{'':11}║",
+        f"  ║{'wireless multi-protocol red team  ·  26 stages':^62}║",
         f"  ║{'':62}║",
         f"  ╚{eq}╝",
         "",
-        "  usage: python main.py -n <name> -l <location> [options]",
+        "  usage: python morpho.py -n <name> -l <location> [options]",
         "",
     ]
     for group_title, stages in _STAGE_GROUPS:
@@ -128,11 +133,11 @@ def _help_text() -> str:
         "",
         f"  EXAMPLES {'─' * 55}",
         "",
-        '    python main.py -n "Lobby" -l "Floor 1"',
-        '    python main.py -n "Lobby" -l "Floor 1" --opt-in',
-        '    python main.py -n "Lab" --stages 1,5,7,8',
-        '    python main.py -n "Lab" --stages 1,2 --no-gate',
-        '    python main.py -n "Survey" --stages 14,17 --esb-interface rfstorm0',
+        '    python morpho.py -n "Lobby" -l "Floor 1"',
+        '    python morpho.py -n "Lobby" -l "Floor 1" --opt-in',
+        '    python morpho.py -n "Lab" --stages 1,5,7,8',
+        '    python morpho.py -n "Lab" --stages 1,2 --no-gate',
+        '    python morpho.py -n "Survey" --stages 14,17 --esb-interface rfstorm0',
         "",
     ]
     return "\n".join(lines) + "\n"
@@ -145,7 +150,7 @@ class _StyledParser(argparse.ArgumentParser):
 
 def _parse_args() -> argparse.Namespace:
     p = _StyledParser(
-        description="BLE Red Team Framework — butterfly-ble-redteam"
+        description="Morpho — Multi-protocol wireless red team framework"
     )
     p.add_argument(
         "--engagement",
@@ -200,7 +205,7 @@ def _parse_args() -> argparse.Namespace:
         help=(
             "Enable all opt-in stages (4=jam, 6=MITM proxy, 9=inject, 16=L2CAP, "
             "17=sub-GHz, 18=ESB active, 19=Unifying API, 20=BLE hijack, "
-            "22=RF4CE recon). "
+            "22=RF4CE recon, 24=MouseJack HID, 25=sub-GHz survey, 26=sub-GHz capture). "
             "Each still requires operator confirmation at runtime via active-gate. "
             "Combine with --stages to add opt-in stages to an explicit list."
         ),
@@ -264,7 +269,7 @@ def _parse_args() -> argparse.Namespace:
 
 # Stages that require explicit operator opt-in (never auto-selected).
 # Each still prompts via active-gate when it runs.
-_OPT_IN_STAGES: frozenset[int] = frozenset({4, 6, 9, 16, 17, 18, 19, 20, 22})
+_OPT_IN_STAGES: frozenset[int] = frozenset({4, 6, 9, 16, 17, 18, 19, 20, 22, 24, 26})
 
 
 def _apply_args(args: argparse.Namespace) -> None:
@@ -325,7 +330,7 @@ def build_cfg_from_args(args: argparse.Namespace) -> "LaunchConfig":
 def _banner(eng_id: str, name: str, location: str) -> None:
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     log.info("=" * 60)
-    log.info("  Butterfly RedTeam")
+    log.info("  Morpho RedTeam")
     log.info(f"  Engagement : {name} ({eng_id})")
     log.info(f"  Location   : {location or 'unspecified'}")
     log.info(f"  Interface  : {config.INTERFACE}")
@@ -342,6 +347,10 @@ def _caps_banner(hw: HardwareMap) -> None:
         log.info(f"  [{dongle.interface}]")
         for ln in dongle.caps.summary_lines():
             log.info(ln)
+    if hw.mousejack_dongle is not None:
+        log.info("  [nRF Research Firmware dongle]")
+        log.info("    Type    : MouseJack nRF24L01+ (Bastille research firmware)")
+        log.info("    Handles : S24 (2.4 GHz HID reconnaissance + injection)")
 
 
 def _hardware_banner(hw: HardwareMap) -> None:
@@ -361,9 +370,15 @@ def _hardware_banner(hw: HardwareMap) -> None:
         log.info(f"  [no ESB device] stages 10, 14 fall back to {fallback}")
     if hw.phy_dongle:
         log.info(f"  [{hw.phy_dongle.interface}]  type={hw.phy_dongle.caps.device_type}")
-        log.info("    Handles  : sub-GHz PHY stage 17")
+        log.info("    Handles  : sub-GHz PHY stages 17, 25, 26 (YardStickOne + rfcat)")
     else:
-        log.info("  [no sub-GHz PHY device] stage 17 will be skipped if requested")
+        log.info("  [no sub-GHz PHY device] stages 17/25/26 will be skipped if requested")
+    if hw.mousejack_dongle is not None:
+        log.info("  [nRF Research Firmware dongle]")
+        log.info("    Handles  : S24 MouseJack 2.4 GHz HID recon + injection")
+    else:
+        log.info("  [no MouseJack dongle] stage 24 unavailable")
+        log.info("    (flash a CrazyRadio PA with Bastille nrf-research-firmware)")
     if hw.ubertooth_dongle:
         log.info(f"  [{hw.ubertooth_dongle.interface}]  type={hw.ubertooth_dongle.caps.device_type}")
         log.info("    Handles  : supplementary passive BLE sniffer (S1/S2 extended range)")
@@ -372,7 +387,7 @@ def _hardware_banner(hw: HardwareMap) -> None:
 def run_stages(cfg: "LaunchConfig", bridge: "PromptBridge") -> None:
     """
     Execute the stage loop. Called either directly (--plain mode) or from
-    Ruby Waves's worker thread (TUI mode).
+    Morpho's worker thread (TUI mode).
     """
     import os as _os
 
@@ -450,6 +465,7 @@ def run_stages(cfg: "LaunchConfig", bridge: "PromptBridge") -> None:
             config.ESB_INTERFACE,
             config.PHY_SUBGHZ_INTERFACE,
             config.UBERTOOTH_INTERFACE,
+            mousejack_usb_idx=getattr(config, "MOUSEJACK_USB_IDX", 0),
         )
         _caps_banner(hw)
         _hardware_banner(hw)
@@ -1029,6 +1045,36 @@ def run_stages(cfg: "LaunchConfig", bridge: "PromptBridge") -> None:
                 stage_banner(23, "Raw IEEE 802.15.4 Reconnaissance", passive=True)
                 s23_dot15d4.run(hw.ble_dongle, eng_id)
 
+        if 24 in stages_requested:
+            if hw.mousejack_dongle is None:
+                log.warning(
+                    "[S24] No MouseJack dongle detected — stage skipped. "
+                    "Flash a CrazyRadio PA with Bastille nrf-research-firmware."
+                )
+            else:
+                from stages import s24_mousejack
+
+                stage_banner(24, "MouseJack 2.4 GHz HID Reconnaissance", passive=False)
+                s24_mousejack.run(hw.mousejack_dongle, eng_id)
+
+        if 25 in stages_requested:
+            if hw.phy_dongle is None:
+                log.warning("[S25] No YardStick One detected — sub-GHz survey skipped.")
+            else:
+                from stages import s25_subghz_survey
+
+                stage_banner(25, "Sub-GHz Spectrum Survey (rfcat)", passive=True)
+                s25_subghz_survey.run(hw.phy_dongle, eng_id)
+
+        if 26 in stages_requested:
+            if hw.phy_dongle is None:
+                log.warning("[S26] No YardStick One detected — sub-GHz capture skipped.")
+            else:
+                from stages import s26_subghz_capture
+
+                stage_banner(26, "Sub-GHz Capture & Replay (rfcat)", passive=False)
+                s26_subghz_capture.run(hw.phy_dongle, eng_id)
+
     except KeyboardInterrupt:
         log.info("Run aborted by user.")
         finish_current_stage(error=True)
@@ -1062,6 +1108,11 @@ def run_stages(cfg: "LaunchConfig", bridge: "PromptBridge") -> None:
                 hw.phy_dongle.close()
             if hw.ubertooth_dongle:
                 hw.ubertooth_dongle.close()
+            if hw.mousejack_dongle is not None:
+                try:
+                    hw.mousejack_dongle.close()
+                except Exception:
+                    pass
 
     from output.markdown_report import generate as gen_md
     from output.json_report import generate as gen_json
@@ -1102,8 +1153,8 @@ def main() -> None:
             config.UBERTOOTH_INTERFACE,
         )
         from tui.bridge import PromptBridge
-        from tui.app import ButterflyApp
-        ButterflyApp(
+        from tui.app import MorphoApp
+        MorphoApp(
             PromptBridge(), run_stages,
             initial_cfg=build_cfg_from_args(args),
             supported_stages=supported,
@@ -1141,14 +1192,24 @@ def _offline_supported_stages(
         def __init__(self, caps: DongleCaps) -> None:
             self.caps = caps
 
+    # Probe for MouseJack dongle (PyUSB, no WHAD)
+    mousejack_present = False
+    try:
+        from core.nrf24 import MouseJackDongle, _VID, _PID
+        import usb.core
+        mousejack_present = usb.core.find(idVendor=_VID, idProduct=_PID) is not None
+    except Exception:
+        pass
+
     fake_hw = HardwareMap(
         ble_dongle=_Cap(ble_caps),                                    # type: ignore[arg-type]
         esb_dongle=_Cap(esb_caps) if esb_caps else None,              # type: ignore[arg-type]
         phy_dongle=_Cap(DongleCaps()) if phy_interface else None,     # type: ignore[arg-type]
         ubertooth_dongle=_Cap(DongleCaps()) if ubertooth_interface else None,  # type: ignore[arg-type]
+        mousejack_dongle=object() if mousejack_present else None,     # type: ignore[arg-type]
     )
     # Filter the complete stage set to what this hardware can actually run.
-    all_stages: set[int] = set(range(1, 24))
+    all_stages: set[int] = set(range(1, 27))
     return _filter_unsupported_stages(all_stages, fake_hw)  # type: ignore[arg-type]
 
 
@@ -1174,9 +1235,13 @@ def _stages_from_hardware(hw: HardwareMap) -> set[int]:
         stages.add(14)                                       # ESB raw channel scan
     if caps.can_lorawan:        stages.add(15)              # LoRaWAN recon
     if hw.phy_dongle is not None:
-        stages.add(17)                                       # sub-GHz PHY (YardStickOne)
+        stages.add(17)                                       # sub-GHz PHY (YardStickOne/WHAD)
+        stages.add(25)                                       # sub-GHz spectrum survey (rfcat)
+        # S26 (capture+replay) is opt-in — always requires active-gate
     # S18 (ESB PRX/PTX) + S19 (Unifying API) are always opt-in — not auto-selected
     # S22 (RF4CE recon) is opt-in — requires explicit --stages 22 or --opt-in
+    # S24 (MouseJack) is opt-in — injection risk, always requires active-gate
+    # S26 (Sub-GHz capture+replay) is opt-in — replay is destructive
     # S21 (BR/EDR) auto-selected when HCI or Ubertooth present
     if hw.ubertooth_dongle is not None or _hci_available():
         stages.add(21)
@@ -1234,13 +1299,17 @@ def _filter_unsupported_stages(stages: set[int], hw: HardwareMap) -> set[int]:
     }
     filtered = set(stages)
     for s in sorted(stages):
-        if s == 17:
+        if s in (17, 25, 26):
             if hw.phy_dongle is None:
-                filtered.discard(17)
+                filtered.discard(s)
             continue
         if s == 21:
             if hw.ubertooth_dongle is None and not _hci_available():
                 filtered.discard(21)
+            continue
+        if s == 24:
+            if hw.mousejack_dongle is None:
+                filtered.discard(24)
             continue
         if s not in _STAGE_CAP:
             continue

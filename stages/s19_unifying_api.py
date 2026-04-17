@@ -423,7 +423,8 @@ def _run_ducky(dongle: WhadDongle, engagement_id: str) -> None:
                         keyboard.volume_toggle()
                     except AttributeError:
                         pass
-                # Unknown command: skip silently
+                else:
+                    log.warning(f"[S19][ducky] Unknown DuckyScript command: {cmd!r}")
             except Exception as exc:
                 log.debug(f"[S19][ducky] cmd {cmd!r}: {exc}")
 

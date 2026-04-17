@@ -31,12 +31,13 @@ from core.models import Finding
 from core.db import insert_finding
 from core.logger import get_logger
 from core.pcap import pcap_path
+from core.vulndb import match_btclassic_service, get_btclassic_generic_vulns, get_braktooth_vulns, VulnMatch
 import config
 
 log = get_logger("s21_btclassic")
 
-_SCAN_SECS      = 30   # hcitool inquiry window
-_SDP_TIMEOUT    = 15   # sdptool per-device timeout
+_SCAN_SECS      = config.BTCLASSIC_SCAN_SECS
+_SDP_TIMEOUT    = config.BTCLASSIC_SDP_TIMEOUT
 _UBERTOOTH_SECS = 60   # ubertooth piconet sniff window
 _MAX_SDP_DEVS   = 8    # cap how many devices we run sdptool against
 
@@ -98,6 +99,34 @@ def run(
     if devices:
         _record_devices_finding(devices, engagement_id)
 
+    # Flag generic BR/EDR CVEs (BIAS, BLURtooth, BrakTooth) for every discoverable device.
+    generic_vulns = get_btclassic_generic_vulns() + get_braktooth_vulns()
+    for dev in devices:
+        for vm in generic_vulns:
+            insert_finding(Finding(
+                type="cve_match",
+                severity=vm.severity,
+                target_addr=dev["addr"],
+                description=(
+                    f"{vm.name}: {vm.summary} "
+                    f"(discoverable device {dev['addr']} "
+                    f"[{dev.get('name', 'unnamed')}])"
+                    + (f" [{vm.cve}]" if vm.cve else "")
+                ),
+                remediation=vm.remediation,
+                evidence={
+                    "cve": vm.cve, "vuln_name": vm.name,
+                    "tags": list(vm.tags), "references": list(vm.references),
+                    "addr": dev["addr"],
+                    "device_name": dev.get("name", ""),
+                },
+                engagement_id=engagement_id,
+            ))
+            log.info(
+                f"FINDING [{vm.severity}] cve_match: {dev['addr']} — "
+                f"{vm.name}" + (f" ({vm.cve})" if vm.cve else "")
+            )
+
 
 # ── BR/EDR device scan ─────────────────────────────────────────────────────────
 
@@ -157,6 +186,37 @@ def _sdp_browse_all(devices: list[dict], engagement_id: str) -> None:
         if risky:
             dev["risky_services"] = risky
             _record_service_finding(dev, risky, engagement_id)
+
+        # Match each SDP service UUID against the CVE vulnerability database.
+        for svc in services:
+            svc_uuid = svc.get("uuid", "")
+            if not svc_uuid:
+                continue
+            cve_hits = match_btclassic_service(svc_uuid)
+            for vm in cve_hits:
+                insert_finding(Finding(
+                    type="cve_match",
+                    severity=vm.severity,
+                    target_addr=addr,
+                    description=(
+                        f"{vm.name}: {vm.summary} "
+                        f"(service {svc.get('name', '?')} uuid={svc_uuid} "
+                        f"on {addr} [{dev.get('name', 'unnamed')}])"
+                        + (f" [{vm.cve}]" if vm.cve else "")
+                    ),
+                    remediation=vm.remediation,
+                    evidence={
+                        "cve": vm.cve, "vuln_name": vm.name,
+                        "tags": list(vm.tags), "references": list(vm.references),
+                        "addr": addr, "service_uuid": svc_uuid,
+                        "service_name": svc.get("name", ""),
+                    },
+                    engagement_id=engagement_id,
+                ))
+                log.info(
+                    f"FINDING [{vm.severity}] cve_match: {addr} — "
+                    f"{vm.name}" + (f" ({vm.cve})" if vm.cve else "")
+                )
 
         # Check for insecure auth mode in sdptool output
         auth_mode = _extract_auth_mode(services)

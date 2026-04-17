@@ -82,7 +82,7 @@ class DashboardScreen(Screen):
         except Exception:
             pass
 
-    # ── Methods called by ButterflyApp message handlers ────────────────────────
+    # ── Methods called by MorphoApp message handlers ────────────────────────
 
     _NON_BLE_STAGES = frozenset({10, 11, 12, 14, 15, 16, 17, 18, 19, 21, 22, 23})
 
@@ -133,7 +133,7 @@ class DashboardScreen(Screen):
     def show_prompt_for(self, req: PromptRequest) -> None:
         """
         Show the appropriate UI for a pending PromptRequest.
-        Called from ButterflyApp when PromptReady message arrives.
+        Called from MorphoApp when PromptReady message arrives.
         Auto-shows the log pane so the user sees any menu options logged above.
         """
         pane = self.query_one("#log-pane", RichLog)

@@ -23,6 +23,7 @@ from core.dongle import WhadDongle
 from core.models import Finding
 from core.db import insert_finding
 from core.logger import get_logger
+from core.vulndb import match_lorawan, VulnMatch
 import config
 
 log = get_logger("s15_lorawan")
@@ -338,10 +339,10 @@ def run(dongle: WhadDongle, engagement_id: str) -> None:
                     for pkt in gw.sniff(timeout=min(5.0, remaining)):
                         _classify_pkt(pkt, join_requests, data_frames)
                 except Exception as exc:
-                    log.debug(f"[S15] sniff() error: {exc}")
+                    log.warning(f"[S15] sniff() error: {type(exc).__name__}: {exc}")
                 break
             except Exception as exc:
-                log.debug(f"[S15] wait_packet error: {exc}")
+                log.warning(f"[S15] wait_packet error: {type(exc).__name__}: {exc}")
                 break
 
             if pkt is not None:
@@ -470,6 +471,26 @@ def _test_join_replay(dongle, join_request: dict, engagement_id: str) -> None:
             engagement_id=engagement_id,
         ))
         log.info("FINDING [high] lorawan_replay_accepted: DevNonce replay not protected")
+
+        # CVE matching: replay accepted
+        for vm in match_lorawan(replay_accepted=True):
+            cve_finding = Finding(
+                type="cve_match",
+                severity=vm.severity,
+                target_addr="lorawan",
+                description=f"{vm.cve + ': ' if vm.cve else ''}{vm.name} — {vm.summary}",
+                remediation=vm.remediation,
+                evidence={
+                    "cve": vm.cve,
+                    "vuln_name": vm.name,
+                    "tags": list(vm.tags),
+                    "references": list(vm.references),
+                    "replayed_dev_eui": join_request.get("dev_eui"),
+                },
+                engagement_id=engagement_id,
+            )
+            insert_finding(cve_finding)
+            log.info(f"FINDING [{vm.severity}] cve_match: {vm.cve or vm.name}")
     elif replay_sent:
         insert_finding(Finding(
             type="lorawan_replay_attempted",
@@ -660,6 +681,26 @@ def _analyze_fcnt(data_frames: list[dict], engagement_id: str) -> None:
         engagement_id=engagement_id,
     ))
     log.info(f"FINDING [medium] lorawan_fcnt_anomaly: {len(anomalies)} anomaly/anomalies")
+
+    # CVE matching: FCnt reset detected
+    for vm in match_lorawan(fcnt_reset=True):
+        _insert(_Finding(
+            type="cve_match",
+            severity=vm.severity,
+            target_addr="lorawan",
+            description=f"{vm.cve + ': ' if vm.cve else ''}{vm.name} — {vm.summary}",
+            remediation=vm.remediation,
+            evidence={
+                "cve": vm.cve,
+                "vuln_name": vm.name,
+                "tags": list(vm.tags),
+                "references": list(vm.references),
+                "anomaly_count": len(anomalies),
+            },
+            pcap_path=None,
+            engagement_id=engagement_id,
+        ))
+        log.info(f"FINDING [{vm.severity}] cve_match: {vm.cve or vm.name}")
 
 
 # ── Summary ───────────────────────────────────────────────────────────────────

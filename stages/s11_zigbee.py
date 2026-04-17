@@ -31,6 +31,7 @@ from core.dongle import WhadDongle
 from core.models import Finding
 from core.db import insert_finding
 from core.logger import get_logger
+from core.vulndb import match_zigbee, VulnMatch
 import config
 
 log = get_logger("s11_zigbee")
@@ -66,7 +67,7 @@ def _ed_channel_survey(dongle: WhadDongle) -> dict[int, Any]:
                     log.debug(f"[S11][coord] ED scan ch{ch}: {ed}")
             except (AttributeError, NotImplementedError):
                 log.debug("[S11][coord] perform_ed_scan() not supported on this hardware")
-                break
+                continue
             except Exception as exc:
                 log.debug(f"[S11][coord] perform_ed_scan() error: {exc}")
         try:
@@ -259,6 +260,50 @@ def run(dongle: WhadDongle, engagement_id: str, mode: str = "passive") -> None:
         insert_finding(finding)
         log.info(f"FINDING [high] zigbee_keys_recovered: {len(all_keys)} key(s)")
 
+        # CVE matching: keys recovered in plaintext during join
+        for vm in match_zigbee(key_in_plaintext=True):
+            cve_finding = Finding(
+                type="cve_match",
+                severity=vm.severity,
+                target_addr="ZigBee",
+                description=f"{vm.cve + ': ' if vm.cve else ''}{vm.name} — {vm.summary}",
+                remediation=vm.remediation,
+                evidence={
+                    "cve": vm.cve,
+                    "vuln_name": vm.name,
+                    "tags": list(vm.tags),
+                    "references": list(vm.references),
+                    "keys_recovered": len(all_keys),
+                },
+                engagement_id=engagement_id,
+            )
+            insert_finding(cve_finding)
+            log.info(f"FINDING [{vm.severity}] cve_match: {vm.cve or vm.name}")
+
+        # CVE matching: check for default Trust Center key
+        _DEFAULT_TC_KEY = bytes.fromhex("5A6967426565416C6C69616E63653039")
+        for k in all_keys:
+            if k == _DEFAULT_TC_KEY:
+                for vm in match_zigbee(default_tc_key=True):
+                    cve_finding = Finding(
+                        type="cve_match",
+                        severity=vm.severity,
+                        target_addr="ZigBee",
+                        description=f"{vm.cve + ': ' if vm.cve else ''}{vm.name} — {vm.summary}",
+                        remediation=vm.remediation,
+                        evidence={
+                            "cve": vm.cve,
+                            "vuln_name": vm.name,
+                            "tags": list(vm.tags),
+                            "references": list(vm.references),
+                            "default_tc_key_hex": k.hex(),
+                        },
+                        engagement_id=engagement_id,
+                    )
+                    insert_finding(cve_finding)
+                    log.info(f"FINDING [{vm.severity}] cve_match: {vm.cve or vm.name} (default TC key)")
+                break  # only emit once even if key appears multiple times
+
     if decrypted_count > 0:
         pan_list = ", ".join(f"0x{p:04X}" for p in networks)
         finding = Finding(
@@ -286,6 +331,26 @@ def run(dongle: WhadDongle, engagement_id: str, mode: str = "passive") -> None:
         log.info(
             f"FINDING [high] zigbee_traffic_decrypted: {decrypted_count} packet(s)"
         )
+
+        # CVE matching: unencrypted transport (traffic was decryptable)
+        for vm in match_zigbee(unencrypted_transport=True):
+            cve_finding = Finding(
+                type="cve_match",
+                severity=vm.severity,
+                target_addr="ZigBee",
+                description=f"{vm.cve + ': ' if vm.cve else ''}{vm.name} — {vm.summary}",
+                remediation=vm.remediation,
+                evidence={
+                    "cve": vm.cve,
+                    "vuln_name": vm.name,
+                    "tags": list(vm.tags),
+                    "references": list(vm.references),
+                    "decrypted_packet_count": decrypted_count,
+                },
+                engagement_id=engagement_id,
+            )
+            insert_finding(cve_finding)
+            log.info(f"FINDING [{vm.severity}] cve_match: {vm.cve or vm.name}")
 
     _print_summary(networks, all_keys, decrypted_count)
 

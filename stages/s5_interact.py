@@ -35,13 +35,14 @@ from core.models import Target, Finding, GattCharacteristic
 from core.db import insert_finding
 from core.logger import get_logger, prompt_line, shell_write, push_shell, pop_shell
 from core.pcap import pcap_path, attach_monitor, detach_monitor
+from core.vulndb import match_ble_service, match_ble_char, VulnMatch
 import config
 
 log = get_logger("s5_interact")
 
 CONNECT_TIMEOUT = 15
-GATT_DISCOVER_TIMEOUT = 20   # seconds for discover() call
-CLI_TIMEOUT = 45             # seconds for the full wble-connect | wble-central run
+GATT_DISCOVER_TIMEOUT = 20
+CLI_TIMEOUT = 15
 
 # Standard GATT characteristic UUID (int) → human-readable name
 UUID_NAMES: dict[int, str] = {
@@ -76,8 +77,8 @@ PROP_WRITE      = 0x08
 PROP_NOTIFY     = 0x10
 PROP_INDICATE   = 0x20
 
-NOTIFY_HARVEST_SECS = 15   # max wall-clock time to listen for notifications
-NOTIFY_SILENCE_SECS = 4    # exit early after this many seconds with no new notifications
+NOTIFY_HARVEST_SECS = 8    # max wall-clock time to listen for notifications
+NOTIFY_SILENCE_SECS = 2    # exit early after this many seconds with no new notifications
 
 
 def run(
@@ -119,7 +120,7 @@ def _run_cli(
     )
 
     dongle.device.close()
-    time.sleep(1.0)
+    time.sleep(0.2)
 
     cmd = (
         f"wble-connect -i {config.INTERFACE} {rand_flag} {addr} "
@@ -218,24 +219,20 @@ def _run_cli(
 
 
 def _reopen_dongle(dongle: WhadDongle) -> None:
-    """Re-attach the underlying WhadDevice, polling every 0.5s up to 15s."""
     import time as _time
-    deadline = _time.time() + 15.0
+    deadline = _time.time() + 5.0
     attempt = 0
     last_exc: Exception | None = None
     while _time.time() < deadline:
         try:
             dongle.device = WhadDevice.create(config.INTERFACE)
-            if attempt > 0:
-                log.debug(f"Reopen succeeded after {attempt * 0.5:.1f}s")
             return
         except Exception as exc:
             last_exc = exc
             attempt += 1
-            _time.sleep(0.5)
+            _time.sleep(0.2)
     log.warning(
-        f"Could not reopen WHAD device after 15s "
-        f"({type(last_exc).__name__}: {last_exc!r})"
+        f"Could not reopen WHAD device ({type(last_exc).__name__}: {last_exc!r})"
     )
 
 
@@ -1150,6 +1147,70 @@ def _record_finding(
         f"{len(unauth_readable)}R / {len(unauth_writable)}W without auth"
     )
 
+    # --- CVE / vulnerability database matching ---
+
+    def _short_uuid(raw: str) -> str:
+        """Extract 4-char short UUID from various formats."""
+        clean = raw.replace("-", "").replace("0x", "").replace("0X", "")
+        if len(clean) == 32 and clean[8:].upper() == "00001000800000805F9B34FB":
+            return clean[:8][-4:].upper()
+        if len(clean) <= 8:
+            return (clean[-4:] if len(clean) > 4 else clean).upper()
+        return raw.upper()
+
+    # Service-level CVE matching (deduplicated by service UUID).
+    seen_svc: set[str] = set()
+    for c in chars:
+        svc = _short_uuid(c.uuid)
+        if svc in seen_svc:
+            continue
+        seen_svc.add(svc)
+        for vm in match_ble_service(svc):
+            insert_finding(Finding(
+                type="cve_match",
+                severity=vm.severity,
+                target_addr=addr,
+                description=(
+                    f"{vm.cve + ': ' if vm.cve else ''}{vm.name} — {vm.summary} "
+                    f"(service UUID {svc} on {addr})"
+                ),
+                remediation=vm.remediation,
+                evidence={
+                    "uuid": svc, "cve": vm.cve, "vuln_name": vm.name,
+                    "references": list(vm.references), "tags": list(vm.tags),
+                },
+                engagement_id=engagement_id,
+            ))
+            log.info(
+                f"FINDING [{vm.severity}] cve_match: {addr} — "
+                f"{vm.cve or vm.name} (service {svc})"
+            )
+
+    # Characteristic-level CVE matching (properties-aware).
+    for c in chars:
+        ch_short = _short_uuid(c.uuid)
+        for vm in match_ble_char(ch_short, c.properties):
+            insert_finding(Finding(
+                type="cve_match",
+                severity=vm.severity,
+                target_addr=addr,
+                description=(
+                    f"{vm.cve + ': ' if vm.cve else ''}{vm.name} — {vm.summary} "
+                    f"(char {ch_short} h={c.value_handle} on {addr})"
+                ),
+                remediation=vm.remediation,
+                evidence={
+                    "uuid": ch_short, "handle": c.value_handle,
+                    "cve": vm.cve, "vuln_name": vm.name,
+                    "references": list(vm.references), "tags": list(vm.tags),
+                },
+                engagement_id=engagement_id,
+            ))
+            log.info(
+                f"FINDING [{vm.severity}] cve_match: {addr} — "
+                f"{vm.cve or vm.name} (char {ch_short} h={c.value_handle})"
+            )
+
 
 def shell(
     dongle: WhadDongle,
@@ -1159,10 +1220,30 @@ def shell(
 ) -> None:
     """Interactive GATT REPL — reconnects and gives a live read/write/subscribe shell.
 
-    Launched by main.py after S5 completes when the operator opts in.
+    Launched by morpho.py after S5 completes when the operator opts in.
     Available commands: read, write, wnr, sub, unsub, notify, info, pyshell, help, quit.
     'pyshell' drops to a raw Python REPL with `periph` and `profile` bound.
+
+    In TUI mode the Textual app is suspended so the shell runs in a plain
+    terminal with real stdin/stdout — no bridge routing needed.
     """
+    import core.logger as _logger_mod
+    if _logger_mod._bridge is not None:
+        # TUI mode: suspend Textual and run the shell with plain stdin/stdout.
+        # We temporarily clear the bridge so every prompt_line() / shell_write()
+        # call inside the recursive invocation uses the plain-terminal path.
+        _bridge_ref = _logger_mod._bridge
+
+        def _run_plain() -> None:
+            _logger_mod._bridge = None
+            try:
+                shell(dongle, target, profile, engagement_id)
+            finally:
+                _logger_mod._bridge = _bridge_ref
+
+        _bridge_ref.run_suspended(_run_plain)
+        return
+
     import code as _code
     import time as _time
 
@@ -1200,7 +1281,44 @@ def shell(
     except Exception as exc:
         log.debug(f"[S5] central.version() failed: {exc}")
 
-    shell_write(f"  [OK] Connected to {addr}  —  type 'help' for commands")
+    shell_write(f"  Discovering GATT profile on {addr} ...")
+    _disc_ok = _discover_with_timeout(periph_dev, addr)
+    if _disc_ok:
+        _new_profile: list[dict] = []
+        _new_by_handle: dict[int, dict] = {}
+        try:
+            for _svc in periph_dev.services():
+                for _ch in (getattr(_svc, "characteristics", None) or []):
+                    _cu = str(getattr(_ch, "uuid", ""))
+                    _vh = int(getattr(_ch, "value_handle", 0))
+                    _h  = int(getattr(_ch, "handle", _vh))
+                    _cp = _extract_properties(_ch)
+                    _entry: dict = {
+                        "uuid": _cu,
+                        "uuid_name": UUID_NAMES.get(_uuid_to_int(_cu), ""),
+                        "handle": _h,
+                        "value_handle": _vh,
+                        "properties": _cp,
+                        "requires_auth": False,
+                        "value_text": None,
+                        "value_hex": None,
+                        "user_description": None,
+                    }
+                    _new_profile.append(_entry)
+                    if _vh > 0:
+                        _new_by_handle[_vh] = _entry
+        except Exception as _exc:
+            shell_write(f"  [WARN] profile rebuild partial: {_exc}")
+        if _new_profile:
+            profile.clear()
+            profile.extend(_new_profile)
+            by_handle.clear()
+            by_handle.update(_new_by_handle)
+        disc_label = f"{len(by_handle)} characteristic(s) discovered"
+    else:
+        disc_label = "discovery incomplete — read/write by handle still works"
+
+    shell_write(f"  [OK] Connected to {addr}  —  {disc_label}  —  type 'help'")
 
     subscribed: dict[int, object] = {}
     notif_buffer: list[dict] = []
@@ -1305,11 +1423,11 @@ def shell(
 
         elif cmd == "write":
             if len(parts) < 3:
-                shell_write("  Usage: write <handle> <hex_bytes>")
+                shell_write("  Usage: write <handle> <hex_bytes>  (e.g. write 22 ff 00 01)")
                 continue
             try:
                 h = int(parts[1], 0)
-                data = bytes.fromhex(parts[2])
+                data = bytes.fromhex("".join(parts[2:]))
                 periph_dev.write(h, data)
                 shell_write(f"  [OK] write h={h}  {len(data)} byte(s) written with response")
             except ValueError as exc:
@@ -1319,11 +1437,11 @@ def shell(
 
         elif cmd == "wnr":
             if len(parts) < 3:
-                shell_write("  Usage: wnr <handle> <hex_bytes>")
+                shell_write("  Usage: wnr <handle> <hex_bytes>  (e.g. wnr 22 ff 00 01)")
                 continue
             try:
                 h = int(parts[1], 0)
-                data = bytes.fromhex(parts[2])
+                data = bytes.fromhex("".join(parts[2:]))
                 periph_dev.write_command(h, data)
                 shell_write(f"  [OK] wnr h={h}  {len(data)} byte(s) written no-response")
             except ValueError as exc:
@@ -1337,15 +1455,23 @@ def shell(
                 continue
             try:
                 h = int(parts[1], 0)
-                c_info = by_handle.get(h, {})
-                uuid_s = c_info.get("uuid", "")
                 char_obj = None
-                if uuid_s:
-                    char_obj = periph_dev.char(uuid_s.lower().replace("0x", ""))
-                    if char_obj is None:
+                for _svc in periph_dev.services():
+                    for _ch in (getattr(_svc, "characteristics", None) or []):
+                        if int(getattr(_ch, "value_handle", -1)) == h:
+                            char_obj = _ch
+                            break
+                    if char_obj:
+                        break
+                if char_obj is None:
+                    c_info = by_handle.get(h, {})
+                    uuid_s = c_info.get("uuid", "")
+                    if uuid_s:
                         char_obj = periph_dev.char(uuid_s)
                 if char_obj is None:
-                    shell_write(f"  [ERR] cannot resolve char h={h} (UUID={uuid_s!r})")
+                    shell_write(
+                        f"  [ERR] char h={h} not found — run 'discover' to refresh profile"
+                    )
                     continue
                 char_obj.subscribe(notification=True, callback=_make_notif_cb(h))
                 subscribed[h] = char_obj

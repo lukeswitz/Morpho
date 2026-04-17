@@ -68,7 +68,7 @@ class GattShellScreen(Screen):
     # ── Output routing ─────────────────────────────────────────────────────
 
     def append_output(self, text: str) -> None:
-        """Called by ButterflyApp when bridge.write_console_output() fires."""
+        """Called by MorphoApp when bridge.write_console_output() fires."""
         if not self._mounted:
             # Screen not composed yet — buffer for on_mount to flush
             self._pending.append(text)

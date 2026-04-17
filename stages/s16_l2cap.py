@@ -43,8 +43,8 @@ _FUZZ_SDUS: list[bytes] = [
     b"%s%s%n" * 5,
 ]
 
-_CONNECT_TIMEOUT = 2.0
-_FUZZ_TIMEOUT    = 5.0
+_CONNECT_TIMEOUT = config.L2CAP_CONNECT_TIMEOUT
+_FUZZ_TIMEOUT    = config.L2CAP_FUZZ_TIMEOUT
 
 
 def run(dongle: WhadDongle, engagement_id: str) -> None:

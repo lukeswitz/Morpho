@@ -33,18 +33,21 @@ from collections.abc import Callable
 from pathlib import Path
 
 from whad.device import WhadDevice
+from whad.ble.exceptions import ConnectionLostException
 
 from core.dongle import WhadDongle
 from core.models import Target, Finding
 from core.db import insert_finding
 from core.logger import get_logger
 from core.pcap import pcap_path
+from core.vulndb import get_vuln_fuzz_payloads, get_sweyntooth_vulns, VulnMatch
 import config
 
 log = get_logger("s7_fuzz")
 
+CONNECT_TIMEOUT = 15    # seconds for BLE connection attempt
 PROFILE_TIMEOUT = 45    # seconds for profile phase
-FUZZ_TIMEOUT    = 300   # seconds for fuzz script execution (increased for bigger payload set)
+FUZZ_TIMEOUT    = config.FUZZ_TIMEOUT
 SETTLE_SECS     = 2.0   # pause between Phase 1 and Phase 2
 
 # Fuzz payloads: (label, command, hex_bytes_string)
@@ -103,28 +106,26 @@ def run(
     cancel: Callable[[], bool] | None = None,
 ) -> list[int]:
     """Run the GATT fuzz stage. Returns the writable handles discovered (may be empty)."""
-    if not _cli_available():
-        log.error(
-            "[S7] wble-connect or wble-central not found in PATH. "
-            "Install WHAD tools: pip install whad"
-        )
-        return []
-
+    use_cli = _cli_available() and dongle.caps.device_type == "hci"
     addr = target.bd_address
     rand_flag = "-r" if target.address_type != "public" else ""
 
+    notify_handles: list[int] = []
+    handle_uuids: dict[int, str] = {}   # value_handle → short UUID for vulndb
+    vuln_payloads_sent = 0
+    response_times: dict[int, dict[str, float]] = {}
+
     if prepped_handles is not None:
-        # S5 already profiled this device — skip Phase 1
         writable_handles = prepped_handles
-        notify_handles: list[int] = []
         log.info(
             f"[S7] Using {len(writable_handles)} writable handle(s) from S5: "
             f"{writable_handles} — skipping re-profile."
         )
-        dongle.device.close()
-        time.sleep(0.5)
-    else:
-        log.info(f"[S7] Phase 1 — profiling {addr} to discover writable handles ...")
+        if use_cli:
+            dongle.device.close()
+            time.sleep(0.5)
+    elif use_cli:
+        log.info(f"[S7] Phase 1 — profiling {addr} (CLI) ...")
         dongle.device.close()
         time.sleep(0.5)
 
@@ -154,6 +155,7 @@ def run(
 
         log.debug(f"[S7] Raw profile stdout for {addr}: {profile_stdout[:500]!r}")
         writable_handles, notify_handles = _parse_handles(profile_stdout)
+        handle_uuids = _parse_handle_uuids(profile_stdout)
         if not writable_handles:
             log.info(f"[S7] No writable handles found on {addr} — nothing to fuzz.")
             _reopen_dongle(dongle)
@@ -164,74 +166,98 @@ def run(
             + (f", {len(notify_handles)} notifiable: {notify_handles}" if notify_handles else "")
             + " — building fuzz script ..."
         )
+    else:
+        log.info(f"[S7] Phase 1 — profiling {addr} (Python API) ...")
+        writable_handles, notify_handles, handle_uuids = _profile_via_python_api(dongle, target)
+        if not writable_handles:
+            log.info(f"[S7] No writable handles found on {addr} — nothing to fuzz.")
+            return []
+        log.info(
+            f"[S7] Found {len(writable_handles)} writable handle(s): {writable_handles}"
+        )
 
-    script_path, total_writes = _write_fuzz_script(
-        writable_handles, engagement_id, notify_handles=notify_handles
-    )
+    total_writes = len(writable_handles) * len(_FUZZ_PAYLOADS)
     log.info(
         f"[S7] Phase 2 — fuzzing {addr} with {total_writes} writes "
         f"across {len(writable_handles)} handle(s) ..."
     )
-    log.info(f"[S7] Script: {script_path}")
 
     time.sleep(SETTLE_SECS)
-    dongle.device.close()
-    time.sleep(0.5)
-
-    fuzz_stdout = ""
-    fuzz_stderr = ""
-    fuzz_rc = -1
     crash_detected = False
-    fuzz_cancelled = False
+    writes_sent = 0
+    error_count = 0
+    fuzz_rc = -1
 
-    try:
-        cmd_fuzz = (
-            f"wble-connect -i {config.INTERFACE} {rand_flag} {addr} "
-            f"| wble-central --file {script_path}"
+    if use_cli:
+        script_path, total_writes, vuln_payloads_sent = _write_fuzz_script(
+            writable_handles, engagement_id, notify_handles=notify_handles,
+            handle_uuids=handle_uuids,
         )
-        log.debug(f"[S7] Fuzz cmd: {cmd_fuzz}")
-        result = _run_cancellable(cmd_fuzz, FUZZ_TIMEOUT, cancel)
-        if result is None:
-            log.info("[S7] Skip requested — aborting fuzz.")
-            fuzz_cancelled = True
-        else:
-            fuzz_stdout, fuzz_stderr, fuzz_rc = result
-    except subprocess.TimeoutExpired:
-        log.warning(
-            f"[S7] Fuzz timed out after {FUZZ_TIMEOUT}s — "
-            "device may have crashed or stopped responding."
-        )
-        crash_detected = True
-    except Exception as exc:
-        log.error(f"[S7] Fuzz subprocess error: {type(exc).__name__}: {exc}")
-    finally:
-        _reopen_dongle(dongle)
+        log.info(f"[S7] Script: {script_path}")
+        dongle.device.close()
+        time.sleep(0.5)
 
-    if fuzz_cancelled:
-        return []
+        fuzz_stdout = ""
+        fuzz_stderr = ""
+        fuzz_cancelled = False
 
-    if fuzz_stderr.strip():
-        log.debug(f"[S7] Fuzz stderr: {fuzz_stderr.strip()[:200]}")
+        try:
+            cmd_fuzz = (
+                f"wble-connect -i {config.INTERFACE} {rand_flag} {addr} "
+                f"| wble-central --file {script_path}"
+            )
+            log.debug(f"[S7] Fuzz cmd: {cmd_fuzz}")
+            result = _run_cancellable(cmd_fuzz, FUZZ_TIMEOUT, cancel)
+            if result is None:
+                log.info("[S7] Skip requested — aborting fuzz.")
+                fuzz_cancelled = True
+            else:
+                fuzz_stdout, fuzz_stderr, fuzz_rc = result
+        except subprocess.TimeoutExpired:
+            log.warning(
+                f"[S7] Fuzz timed out after {FUZZ_TIMEOUT}s — "
+                "device may have crashed or stopped responding."
+            )
+            crash_detected = True
+        except Exception as exc:
+            log.error(f"[S7] Fuzz subprocess error: {type(exc).__name__}: {exc}")
+        finally:
+            _reopen_dongle(dongle)
+            try:
+                Path(script_path).unlink(missing_ok=True)
+            except Exception:
+                pass
 
-    if not crash_detected:
-        crash_detected = _detect_crash(fuzz_stdout, fuzz_rc)
+        if fuzz_cancelled:
+            return []
 
-    writes_sent, error_count = _parse_fuzz_output(fuzz_stdout, total_writes)
+        if fuzz_stderr.strip():
+            log.debug(f"[S7] Fuzz stderr: {fuzz_stderr.strip()[:200]}")
+
+        if not crash_detected:
+            crash_detected = _detect_crash(fuzz_stdout, fuzz_rc)
+
+        writes_sent, error_count = _parse_fuzz_output(fuzz_stdout, total_writes)
+    else:
+        try:
+            writes_sent, error_count, crash_detected, vuln_payloads_sent, response_times = _run_python_fuzz(
+                dongle, target, writable_handles, cancel,
+                handle_uuids=handle_uuids,
+            )
+        except Exception as exc:
+            log.error(f"[S7] Python fuzz exception: {type(exc).__name__}: {exc}")
 
     log.info(
         f"[S7] Fuzz complete: handles={len(writable_handles)}  "
         f"writes={writes_sent}/{total_writes}  errors={error_count}  "
-        f"crash={crash_detected}  exit={fuzz_rc}"
+        f"crash={crash_detected}"
     )
-
-    try:
-        Path(script_path).unlink(missing_ok=True)
-    except Exception:
-        pass
 
     _record_finding(
         target, engagement_id,
         writable_handles, writes_sent, total_writes, error_count, crash_detected,
+        vuln_payloads_sent=vuln_payloads_sent,
+        response_times=response_times,
     )
     _print_summary(
         target, writable_handles, writes_sent, total_writes, error_count,
@@ -263,7 +289,7 @@ def _parse_handles(profile_output: str) -> tuple[list[int], list[int]]:
         line = ansi_re.sub("", raw_line).strip()
         if not line:
             continue
-        vh_match = re.search(r"value handle:\s*(\d+)", line, re.I)
+        vh_match = re.search(r"\bvalue handle:\s*(\d+)", line, re.I)
         if not vh_match:
             continue
         if re.match(r"service", line, re.I):
@@ -320,20 +346,218 @@ def _parse_writable_handles(profile_output: str) -> list[int]:
     return handles
 
 
+def _parse_handle_uuids(profile_output: str) -> dict[int, str]:
+    """Extract value_handle → short UUID mapping from wble-central profile output.
+
+    Profile format example:
+        Battery Level (0x2a19) RW, handle 9, value handle: 10
+    Returns {10: "2A19", ...}.
+    """
+    ansi_re = re.compile(r"\x1b\[[0-9;]*[mABCDEFGHJKLMSTfnsulh]")
+    mapping: dict[int, str] = {}
+    for raw_line in profile_output.splitlines():
+        line = ansi_re.sub("", raw_line).strip()
+        if not line:
+            continue
+        vh_match = re.search(r"\bvalue handle:\s*(\d+)", line, re.I)
+        if not vh_match:
+            continue
+        if re.match(r"service\b", line, re.I):
+            continue
+        uuid_match = re.search(r"\(0x([0-9a-fA-F]{4,})\)", line)
+        if uuid_match:
+            mapping[int(vh_match.group(1))] = uuid_match.group(1).upper()
+    return mapping
+
+
+def _profile_via_python_api(
+    dongle: WhadDongle,
+    target: Target,
+) -> tuple[list[int], list[int], dict[int, str]]:
+    """Profile the target via Python API.
+
+    Returns (writable_handles, notify_handles, handle_uuids).
+    """
+    from whad.ble.profile.characteristic import CharacteristicProperties
+    addr = target.bd_address
+    is_random = target.address_type != "public"
+    writable: list[int] = []
+    notifiable: list[int] = []
+    h_uuids: dict[int, str] = {}
+
+    central = dongle.central()
+    periph_dev = None
+    try:
+        periph_dev = central.connect(addr, random=is_random, timeout=CONNECT_TIMEOUT)
+        if periph_dev is None:
+            log.warning("[S7] Python API profile: could not connect")
+            return [], []
+
+        done = threading.Event()
+        exc_holder: list[Exception] = []
+
+        def _disc() -> None:
+            try:
+                periph_dev.discover()
+            except Exception as e:
+                exc_holder.append(e)
+            finally:
+                done.set()
+
+        t = threading.Thread(target=_disc, daemon=True)
+        t.start()
+        done.wait(timeout=20.0)
+
+        for svc in periph_dev.services():
+            for ch in (getattr(svc, "characteristics", None) or []):
+                vh = int(getattr(ch, "value_handle", 0))
+                raw = getattr(ch, "properties", 0)
+                props = int(raw) if isinstance(raw, int) else 0
+                if props & 0x08 or props & 0x04:
+                    writable.append(vh)
+                if props & 0x10 or props & 0x20:
+                    notifiable.append(vh)
+                # Extract short UUID for vulndb lookup
+                ch_uuid = str(getattr(ch, "uuid", "")).replace("0x", "").upper()
+                if ch_uuid and vh:
+                    h_uuids[vh] = ch_uuid[-4:] if len(ch_uuid) >= 4 else ch_uuid
+    except Exception as exc:
+        log.warning(f"[S7] Python API profile error: {type(exc).__name__}: {exc}")
+    finally:
+        if periph_dev:
+            try:
+                periph_dev.disconnect()
+            except Exception:
+                pass
+    return writable, notifiable, h_uuids
+
+
+def _run_python_fuzz(
+    dongle: WhadDongle,
+    target: Target,
+    handles: list[int],
+    cancel: Callable[[], bool] | None,
+    handle_uuids: dict[int, str] | None = None,
+) -> tuple[int, int, bool, int, dict[int, dict[str, float]]]:
+    """Fuzz writable handles via Python API.
+
+    Returns (writes_sent, error_count, crash, vuln_payloads_sent, response_times).
+    response_times maps handle → {min, max, avg, count} in seconds.
+    """
+    addr = target.bd_address
+    is_random = target.address_type != "public"
+    writes_sent = 0
+    error_count = 0
+    vuln_payloads_sent = 0
+    raw_times: dict[int, list[float]] = {}
+    h_uuids = handle_uuids or {}
+
+    def _timed_write(periph_dev, handle: int, payload: bytes,
+                     use_cmd: bool, label: str) -> bool:
+        """Write with timing. Returns True if connection lost (crash)."""
+        nonlocal writes_sent, error_count
+        t0 = time.time()
+        try:
+            if use_cmd:
+                periph_dev.write_command(handle, payload)
+            else:
+                periph_dev.write(handle, payload)
+            elapsed = time.time() - t0
+            raw_times.setdefault(handle, []).append(elapsed)
+            writes_sent += 1
+            return False
+        except ConnectionLostException:
+            log.warning(f"[S7] CRASH: connection lost at h={handle} payload={label}")
+            return True
+        except Exception:
+            elapsed = time.time() - t0
+            raw_times.setdefault(handle, []).append(elapsed)
+            error_count += 1
+            writes_sent += 1
+            return False
+
+    def _finalize_times() -> dict[int, dict[str, float]]:
+        result: dict[int, dict[str, float]] = {}
+        for h, times in raw_times.items():
+            if times:
+                result[h] = {
+                    "min": round(min(times), 4),
+                    "max": round(max(times), 4),
+                    "avg": round(sum(times) / len(times), 4),
+                    "count": len(times),
+                }
+        return result
+
+    central = dongle.central()
+    periph_dev = None
+    try:
+        periph_dev = central.connect(addr, random=is_random, timeout=CONNECT_TIMEOUT)
+        if periph_dev is None:
+            log.warning("[S7] Python API fuzz: could not connect")
+            return 0, 0, False, 0, {}
+
+        # Phase A: standard payloads
+        for handle in handles:
+            for _label, cmd, hex_payload in _FUZZ_PAYLOADS:
+                if cancel is not None and cancel():
+                    return writes_sent, error_count, False, vuln_payloads_sent, _finalize_times()
+                payload = (
+                    bytes.fromhex(hex_payload.replace(" ", ""))
+                    if hex_payload.strip()
+                    else b""
+                )
+                if _timed_write(periph_dev, handle, payload, cmd == "writecmd", _label):
+                    return writes_sent, error_count, True, vuln_payloads_sent, _finalize_times()
+
+        # Phase B: CVE-targeted vulndb payloads
+        for handle in handles:
+            uuid_short = h_uuids.get(handle, "")
+            vuln_payloads = get_vuln_fuzz_payloads(uuid_short)
+            if vuln_payloads:
+                log.debug(
+                    f"[S7] Sending {len(vuln_payloads)} vulndb payloads "
+                    f"for h={handle} uuid={uuid_short}"
+                )
+            for vlabel, vpayload in vuln_payloads:
+                if cancel is not None and cancel():
+                    return writes_sent, error_count, False, vuln_payloads_sent, _finalize_times()
+                if _timed_write(periph_dev, handle, vpayload, False, vlabel):
+                    return writes_sent, error_count, True, vuln_payloads_sent, _finalize_times()
+                vuln_payloads_sent += 1
+
+    except ConnectionLostException:
+        return writes_sent, error_count, True, vuln_payloads_sent, _finalize_times()
+    except Exception as exc:
+        log.error(f"[S7] Python API fuzz error: {type(exc).__name__}: {exc}")
+    finally:
+        if periph_dev:
+            try:
+                periph_dev.disconnect()
+            except Exception:
+                pass
+
+    return writes_sent, error_count, False, vuln_payloads_sent, _finalize_times()
+
+
 def _write_fuzz_script(
     handles: list[int],
     engagement_id: str,
     notify_handles: list[int] | None = None,
-) -> tuple[str, int]:
+    handle_uuids: dict[int, str] | None = None,
+) -> tuple[str, int, int]:
     """Generate a wble-central gsh fuzz script and write it to a temp file.
 
     Phase A: standard payload matrix against all writable handles.
     Phase B: subscribe+write notification-handler fuzzing for notifiable handles.
-    Returns (script_path, total_write_count).
+    Phase C: CVE-targeted vulndb payloads per handle UUID.
+    Returns (script_path, total_write_count, vuln_payload_count).
     """
     import os
     lines: list[str] = []
+    h_uuids = handle_uuids or {}
+    vuln_count = 0
 
+    # Phase A: standard payloads
     for handle in handles:
         for _label, cmd, hex_payload in _FUZZ_PAYLOADS:
             payload = hex_payload.strip()
@@ -342,9 +566,7 @@ def _write_fuzz_script(
             else:
                 lines.append(f"{cmd} {handle} hex")
 
-    # Subscribe+write: enable notifications on handle, fuzz the value, unsub.
-    # Targets notification callback handlers which are often less hardened than
-    # the ATT write handler itself.
+    # Phase B: subscribe+write notification-handler fuzzing
     for nh in (notify_handles or []):
         lines.append(f"sub {nh}")
         for _label, cmd, hex_payload in _SUB_WRITE_PAYLOADS:
@@ -355,13 +577,24 @@ def _write_fuzz_script(
                 lines.append(f"{cmd} {nh} hex")
         lines.append(f"unsub {nh}")
 
+    # Phase C: CVE-targeted vulndb payloads
+    for handle in handles:
+        uuid_short = h_uuids.get(handle, "")
+        for vlabel, vpayload in get_vuln_fuzz_payloads(uuid_short):
+            hex_str = " ".join(f"{b:02x}" for b in vpayload) if vpayload else ""
+            if hex_str:
+                lines.append(f"write {handle} hex {hex_str}")
+            else:
+                lines.append(f"write {handle} hex")
+            vuln_count += 1
+
     script = "\n".join(lines) + "\n"
     fd, path = tempfile.mkstemp(prefix=f"s7_{engagement_id}_", suffix=".gsh")
     try:
         os.write(fd, script.encode())
     finally:
         os.close(fd)
-    return path, len(lines)
+    return path, len(lines), vuln_count
 
 
 def _detect_crash(stdout: str, returncode: int) -> bool:
@@ -520,10 +753,23 @@ def _record_finding(
     total_writes: int,
     error_count: int,
     crash_detected: bool,
+    vuln_payloads_sent: int = 0,
+    response_times: dict[int, dict[str, float]] | None = None,
 ) -> None:
     severity, description = _assess(
         writable_handles, writes_sent, total_writes, error_count, crash_detected, target
     )
+    evidence: dict = {
+        "writable_handles": writable_handles,
+        "total_payloads_planned": total_writes,
+        "writes_sent": writes_sent,
+        "error_count": error_count,
+        "crash_detected": crash_detected,
+        "vuln_payloads_sent": vuln_payloads_sent,
+        "sweyntooth_tested": True,
+    }
+    if response_times:
+        evidence["response_times"] = response_times
     finding = Finding(
         type="gatt_fuzz",
         severity=severity,
@@ -534,13 +780,7 @@ def _record_finding(
             "Return ATT error 0x0D (Application Error) for malformed writes. "
             "Add watchdog recovery to prevent BLE stack hangs on malformed input."
         ),
-        evidence={
-            "writable_handles": writable_handles,
-            "total_payloads_planned": total_writes,
-            "writes_sent": writes_sent,
-            "error_count": error_count,
-            "crash_detected": crash_detected,
-        },
+        evidence=evidence,
         engagement_id=engagement_id,
     )
     insert_finding(finding)

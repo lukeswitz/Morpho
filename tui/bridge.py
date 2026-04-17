@@ -160,6 +160,31 @@ class PromptBridge:
     def _notify_prompt(self, req: PromptRequest) -> None:
         pass
 
+    def _request_tui_suspend(self, fn: Callable) -> None:
+        """Stub — wired by MorphoApp to suspend TUI and run fn() in plain terminal."""
+        fn()
+
+    def run_suspended(self, fn: Callable) -> None:
+        """Run fn() with the TUI suspended so fn can use plain stdin/stdout.
+
+        The worker thread blocks here until fn() returns.  The TUI event loop
+        suspends Textual (restores terminal), runs fn() in a thread, then
+        resumes Textual when fn() finishes.
+        """
+        if self._app_call is None:
+            fn()
+            return
+        done: threading.Event = threading.Event()
+
+        def _wrapped() -> None:
+            try:
+                fn()
+            finally:
+                done.set()
+
+        self._app_call(self._request_tui_suspend, _wrapped)
+        done.wait()
+
     @staticmethod
     def _noop() -> None:
         pass

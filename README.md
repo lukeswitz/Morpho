@@ -1,5 +1,5 @@
 <div align="center">
-<img width="480" alt="Butterfly RedTeam" src="https://github.com/user-attachments/assets/2560fdc5-341a-4fdb-8160-73fb4ed4f6ac" />
+<img width="480" alt="Morpho" src="https://github.com/user-attachments/assets/2560fdc5-341a-4fdb-8160-73fb4ed4f6ac" />
 
 <h3>Multi-protocol wireless red team framework built on <a href="https://github.com/whad-team/whad-client">WHAD</a></h3>
 
@@ -39,8 +39,8 @@
 
 ```bash
 # 1. Clone and install
-git clone https://github.com/lukeswitz/RubyWaves.git
-cd RubyWaves
+git clone https://github.com/lukeswitz/Morpho.git
+cd Morpho
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
@@ -78,7 +78,7 @@ All devices are **auto-detected** from `whadup` at startup. Stages route to the 
 ## CLI Reference
 
 ```
-python rubywaves.py [OPTIONS]
+python morpho.py [OPTIONS]
 ```
 
 | Flag | Short | Default | Description |
@@ -106,45 +106,45 @@ python rubywaves.py [OPTIONS]
 
 ```bash
 # TUI mode — interactive launch form (default when stdout is a TTY)
-python rubywaves.py
+python morpho.py
 
 # TUI with pre-filled fields
-python rubywaves.py -n "Engagement1" -l "Building A"
+python morpho.py -n "Engagement1" -l "Building A"
 
 # Plain / SSH mode — no TUI, stdin prompts
-python rubywaves.py --plain -n "Engagement1" -l "Building A"
+python morpho.py --plain -n "Engagement1" -l "Building A"
 
 # Explicit stage list (plain mode)
-python rubywaves.py --plain -n "Engagement1" --stages 1,2,5,7,8
+python morpho.py --plain -n "Engagement1" --stages 1,2,5,7,8
 
 # Enable all opt-in stages (gate prompt still required for each)
-python rubywaves.py -n "Engagement1" --opt-in
+python morpho.py -n "Engagement1" --opt-in
 
 # Focus on a specific target
-python rubywaves.py -n "Engagement1" --target AA:BB:CC:DD:EE:FF
+python morpho.py -n "Engagement1" --target AA:BB:CC:DD:EE:FF
 
 # ESB / sub-GHz only (no BLE dongle required)
-python rubywaves.py -n "Engagement1" --stages 10,14,17
+python morpho.py -n "Engagement1" --stages 10,14,17
 
 # Extended scan, skip prompts (automated / scripted use)
-python rubywaves.py -n "Engagement1" --scan-duration 300 --no-gate
+python morpho.py -n "Engagement1" --scan-duration 300 --no-gate
 
 # Override all hardware interfaces manually
-python rubywaves.py \
+python morpho.py \
   --interface uart0 \
   --esb-interface rfstorm0 \
   --phy-interface yardstickone0 \
   --ubertooth-interface ubertooth0
 
 # Debug logging
-python rubywaves.py -n "Engagement1" --debug
+python morpho.py -n "Engagement1" --debug
 ```
 
 ---
 
 ## Terminal UI
 
-Butterfly ships a Textual-based TUI by default when stdout is a TTY. Use `--plain` to disable it for SSH or headless use.
+Morpho ships a Textual-based TUI by default when stdout is a TTY. Use `--plain` to disable it for SSH or headless use.
 
 ### Dashboard
 
@@ -421,7 +421,7 @@ The ButteRFly firmware does not re-emit DeviceReady after boot, so `reset()` tim
 ```bash
 export TERM=xterm-256color
 # Or use plain mode:
-python rubywaves.py --plain --stages 1,2,5 --no-gate
+python morpho.py --plain --stages 1,2,5 --no-gate
 ```
 
 **No BLE dongle — only rfstorm0 / yardstickone0 connected**

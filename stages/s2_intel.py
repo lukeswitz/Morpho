@@ -22,6 +22,7 @@ from core.models import Target, Connection, Finding
 from core.db import insert_connection, insert_finding
 from core.logger import get_logger
 from core.pcap import pcap_path, attach_monitor, detach_monitor
+from core.vulndb import match_pairing, match_key_size, VulnMatch
 import config
 
 log = get_logger("s2_intel")
@@ -419,6 +420,41 @@ def _evaluate_findings(conn: Connection, engagement_id: str) -> None:
         log.info(
             f"FINDING [critical] weak_pairing: "
             f"{conn.peripheral_addr}"
+        )
+
+    # ── CVE matching via vulndb ──
+    is_legacy = conn.legacy_pairing_observed
+    is_just_works = is_legacy and not conn.encrypted
+    is_sc = not is_legacy and conn.encrypted
+    pairing_vulns = match_pairing(
+        legacy=is_legacy,
+        just_works=is_just_works,
+        mitm=False,  # S2 passive sniffer cannot confirm MITM flag
+        sc=is_sc,
+    )
+    for vm in pairing_vulns:
+        insert_finding(Finding(
+            type="cve_match",
+            severity=vm.severity,
+            target_addr=conn.peripheral_addr,
+            description=(
+                f"{vm.name}: {vm.summary} "
+                f"(observed on {conn.central_addr} <-> {conn.peripheral_addr})"
+                + (f" [{vm.cve}]" if vm.cve else "")
+            ),
+            remediation=vm.remediation,
+            evidence={
+                "cve": vm.cve, "vuln_name": vm.name,
+                "tags": list(vm.tags), "references": list(vm.references),
+                "central_addr": conn.central_addr,
+                "peripheral_addr": conn.peripheral_addr,
+            },
+            engagement_id=engagement_id,
+        ))
+        log.info(
+            f"FINDING [{vm.severity}] cve_match: "
+            f"{conn.peripheral_addr} — {vm.name}"
+            + (f" ({vm.cve})" if vm.cve else "")
         )
 
 

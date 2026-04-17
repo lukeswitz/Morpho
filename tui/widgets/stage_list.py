@@ -14,7 +14,7 @@ class StageState(Enum):
     ERROR    = "error"
 
 
-# All 23 stage labels — mirrors _STAGE_GROUPS in main.py
+# All 23 stage labels — mirrors _STAGE_GROUPS in morpho.py
 _STAGE_LABELS: dict[int, str] = {
     1:  "S01 env mapping",
     2:  "S02 conn intel",

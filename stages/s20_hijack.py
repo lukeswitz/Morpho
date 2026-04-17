@@ -32,8 +32,8 @@ import config
 
 log = get_logger("s20_hijack")
 
-_SYNC_TIMEOUT   = 15   # seconds to wait for connection sync
-_HIJACK_TIMEOUT = 10   # seconds after sync to complete the hijack
+_SYNC_TIMEOUT   = config.HIJACK_SYNC_TIMEOUT
+_HIJACK_TIMEOUT = config.HIJACK_EXEC_TIMEOUT
 _POST_GATT_ENUM = True # run quick GATT enumeration after successful hijack
 
 

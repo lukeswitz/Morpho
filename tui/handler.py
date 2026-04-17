@@ -4,14 +4,14 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from tui.app import ButterflyApp
+    from tui.app import MorphoApp
 
 class TuiLogHandler(logging.Handler):
     """
     Routes Python log records to Textual's RichLog widget via call_from_thread.
     """
 
-    def __init__(self, app: "ButterflyApp") -> None:
+    def __init__(self, app: "MorphoApp") -> None:
         super().__init__()
         self._app = app
 

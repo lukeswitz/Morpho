@@ -14,7 +14,7 @@ def pcap_path(engagement_id: str, stage: int, addr: str) -> Path:
     """Return the canonical PCAP path for a stage + address combination.
 
     Args:
-        engagement_id: Short hex engagement ID from main.py.
+        engagement_id: Short hex engagement ID from morpho.py.
         stage: Stage number (1–6).
         addr: BD address string like 'AA:BB:CC:DD:EE:FF', or a label
               like 'scan' for stage 1 which has no single device address.

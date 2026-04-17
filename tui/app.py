@@ -16,15 +16,15 @@ from tui.screens.gatt_shell import GattShellScreen
 from tui.screens.launch import LaunchConfig, LaunchScreen
 
 
-class ButterflyApp(App):
+class MorphoApp(App):
     """
-    Textual application for Butterfly-RedTeam.
+    Textual application for Morpho RedTeam.
 
     Flow:
       1. on_mount → install log handler → push LaunchScreen
       2. User fills form and clicks LAUNCH → on_launch_screen_launched
          → push DashboardScreen → start worker thread calling run_stages_fn
-      3. Worker thread calls bridge.request_prompt() → blocks → ButterflyApp
+      3. Worker thread calls bridge.request_prompt() → blocks → MorphoApp
          receives PromptReady → pushes modal → user responds → on_*_result
          → bridge.resolve(value) → worker unblocks
       4. Worker ends → run complete
@@ -78,6 +78,12 @@ class ButterflyApp(App):
         def __init__(self, line: str) -> None:
             super().__init__()
             self.line = line
+
+    class SuspendForShell(Message):
+        """Instructs the app to suspend the TUI and run fn() in plain terminal mode."""
+        def __init__(self, fn: Callable) -> None:
+            super().__init__()
+            self.fn = fn
 
     # ── Constructor ───────────────────────────────────────────────────────────
 
@@ -211,9 +217,13 @@ class ButterflyApp(App):
         def _notify_console_output(line: str) -> None:
             app.call_from_thread(lambda: app.post_message(app.ConsoleOutput(line)))
 
+        def _request_tui_suspend(fn: Callable) -> None:
+            app.post_message(app.SuspendForShell(fn))
+
         self._bridge.push_gatt_shell = _notify_push_gatt_shell  # type: ignore[method-assign]
         self._bridge.pop_gatt_shell = _notify_pop_gatt_shell  # type: ignore[method-assign]
         self._bridge.write_console_output = _notify_console_output  # type: ignore[method-assign]
+        self._bridge._request_tui_suspend = _request_tui_suspend  # type: ignore[method-assign]
 
     # ── Log handler ───────────────────────────────────────────────────────────
 
@@ -252,7 +262,7 @@ class ButterflyApp(App):
         self.call_after_refresh(lambda: self._start_worker(cfg))
 
     def _start_worker(self, cfg: LaunchConfig) -> None:
-        # whad.cli.app was pre-imported in main.py before the TUI started.
+        # whad.cli.app was pre-imported in morpho.py before the TUI started.
         # Re-strip any StreamHandlers it may have added to the root logger.
         if self._log_handler is not None:
             logging.root.handlers = [
@@ -270,7 +280,7 @@ class ButterflyApp(App):
 
     # ── Cross-thread message handlers (run in Textual event loop) ─────────────
 
-    def on_butterfly_app_log_line(self, event: LogLine) -> None:
+    def on_morpho_app_log_line(self, event: LogLine) -> None:
         try:
             screen = self.screen
             if isinstance(screen, DashboardScreen):
@@ -278,7 +288,7 @@ class ButterflyApp(App):
         except Exception:
             pass
 
-    def on_butterfly_app_stage_started(self, event: StageStarted) -> None:
+    def on_morpho_app_stage_started(self, event: StageStarted) -> None:
         try:
             screen = self.screen
             if isinstance(screen, DashboardScreen):
@@ -286,7 +296,7 @@ class ButterflyApp(App):
         except Exception:
             pass
 
-    def on_butterfly_app_stage_finished(self, event: StageFinished) -> None:
+    def on_morpho_app_stage_finished(self, event: StageFinished) -> None:
         try:
             screen = self.screen
             if isinstance(screen, DashboardScreen):
@@ -294,7 +304,7 @@ class ButterflyApp(App):
         except Exception:
             pass
 
-    def on_butterfly_app_target_found(self, event: TargetFound) -> None:
+    def on_morpho_app_target_found(self, event: TargetFound) -> None:
         try:
             screen = self.screen
             if isinstance(screen, DashboardScreen):
@@ -302,7 +312,7 @@ class ButterflyApp(App):
         except Exception:
             pass
 
-    def on_butterfly_app_prompt_ready(self, event: PromptReady) -> None:
+    def on_morpho_app_prompt_ready(self, event: PromptReady) -> None:
         try:
             screen = self.screen
             if isinstance(screen, DashboardScreen):
@@ -310,7 +320,7 @@ class ButterflyApp(App):
         except Exception:
             pass
 
-    def on_butterfly_app_gatt_shell_push(self, event: GattShellPush) -> None:
+    def on_morpho_app_gatt_shell_push(self, event: GattShellPush) -> None:
         try:
             screen = GattShellScreen(event.addr, self._bridge)
             self.push_screen(screen)
@@ -318,7 +328,7 @@ class ButterflyApp(App):
             logging.getLogger("tui").error("gatt_shell_push: %s", exc)
             self._bridge._shell_ready.set()
 
-    def on_butterfly_app_gatt_shell_pop(self, event: GattShellPop) -> None:
+    def on_morpho_app_gatt_shell_pop(self, event: GattShellPop) -> None:
         popped = False
         try:
             if isinstance(self.screen, GattShellScreen):
@@ -331,13 +341,19 @@ class ButterflyApp(App):
         else:
             self._bridge._shell_popped.set()
 
-    def on_butterfly_app_console_output(self, event: ConsoleOutput) -> None:
+    def on_morpho_app_console_output(self, event: ConsoleOutput) -> None:
         try:
             screen = self.screen
             if isinstance(screen, GattShellScreen):
                 screen.append_output(event.line)
         except Exception:
             pass
+
+    async def on_morpho_app_suspend_for_shell(self, event: SuspendForShell) -> None:
+        """Suspend the TUI, run event.fn() in a thread with plain stdin/stdout, then resume."""
+        import asyncio
+        async with self.suspend():
+            await asyncio.to_thread(event.fn)
 
     # ── Methods called by DashboardScreen / modals to resolve prompts ──────────
 

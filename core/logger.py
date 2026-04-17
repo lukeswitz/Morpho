@@ -122,7 +122,7 @@ def install_tui(bridge: "PromptBridge") -> None:
 
 
 def prompt_line(msg: str) -> str | None:
-    """Drop-in replacement for raw input() calls in stage files and main.py.
+    """Drop-in replacement for raw input() calls in stage files and morpho.py.
 
     In TUI mode: blocks worker thread via bridge until operator responds in modal.
     Returns None if the bridge was aborted (app is shutting down).

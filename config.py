@@ -15,6 +15,9 @@ TARGET_FILTER = []
 RSSI_MIN_FILTER = 0     # dBm — 0 = no filter; e.g. -70 ignores devices weaker than -70 dBm
 S3_SPAWN_MODE   = False  # True = use wble-spawn transparent relay instead of static clone
 
+# Stage 4 — Reactive Jamming
+JAM_DURATION = 30              # seconds to jam advertisements/connections
+
 # Stage 13 — SMP Pairing Vulnerability Scanner
 S13_CONNECT_TIMEOUT = 15   # seconds to establish each test connection
 S13_PAIRING_TIMEOUT = 15   # seconds per pairing attempt (WHAD blocks internally)
@@ -24,6 +27,7 @@ UNIFYING_SNIFF_SECS   = 30               # passive channel-scan window
 UNIFYING_INJECT_SECS  = 10               # quick scan before inject to find devices
 MOUSEJACK_TEXT        = "MouseJack-PoC"  # text injected in keyboard PoC
 UNIFYING_LOCALE       = "us"             # keyboard locale for wuni-keyboard -l
+UNIFYING_KL_SECS      = 15              # keylogger capture duration
 UNIFYING_DUCKY_SCRIPT: str | None = None # path to DuckyScript file for inject -d mode
 
 # Stage 18 — ESB PRX/PTX Active Attack
@@ -61,13 +65,67 @@ ESB_SCAN_SECS    = 60    # total scan budget across all channels
 ESB_PER_CH_SECS  = 1     # packet wait timeout per channel
 
 # Stage 15 — LoRaWAN Recon
-LORAWAN_REGION    = "EU868"   # "EU868" or "US915"
-LORAWAN_SNIFF_SECS = 120      # total passive listen window
+LORAWAN_REGION         = "EU868"   # "EU868" or "US915"
+LORAWAN_SNIFF_SECS     = 120      # total passive listen window
+LORAWAN_REPLAY_TIMEOUT = 5        # seconds to wait for Join Accept after replay
 
 # Stage 17 — YardStickOne sub-GHz PHY Survey
+# Stage 16 — L2CAP CoC Testing
+L2CAP_CONNECT_TIMEOUT = 2.0   # seconds per PSM connection attempt
+L2CAP_FUZZ_TIMEOUT    = 5.0   # seconds per SDU fuzz round
+
+# Stage 20 — BLE Connection Hijacker
+HIJACK_SYNC_TIMEOUT = 15      # seconds to wait for connection sync
+HIJACK_EXEC_TIMEOUT = 10      # seconds for hijack execution
+
+# Stage 21 — BR/EDR Scout Additional
+BTCLASSIC_SCAN_SECS  = 30     # inquiry duration
+BTCLASSIC_SDP_TIMEOUT = 15    # per-device SDP browse timeout
+
+# Stage 7 — GATT Fuzzer
+FUZZ_TIMEOUT = 300             # seconds for fuzz script execution
+
 SUBGHZ_SWEEP_SECS    = 120   # total sweep budget
 SUBGHZ_PER_FREQ_SECS = 2     # dwell per frequency step
 SUBGHZ_RECORD_SECS   = 5     # focused PCAP capture per active OOK frequency
+
+# Stage 24 — MouseJack 2.4 GHz HID Reconnaissance
+MOUSEJACK_USB_IDX       = 0          # USB device index (0 = first dongle)
+MOUSEJACK_SCAN_SECS     = 60         # total promiscuous scan budget
+MOUSEJACK_DWELL_MS      = 100        # per-channel dwell in promiscuous mode (ms)
+# Channels to scan: 0-99 (2402-2501 MHz). Channels 1-24 used by Logitech;
+# Microsoft/other vendors use 25-75. Full scan covers all.
+MOUSEJACK_CHANNELS: list[int] = list(range(0, 100))
+# Data rates to probe: 250K has best sensitivity, 2M is most common.
+MOUSEJACK_RATES: list[int] = [0, 1, 2]  # 0=250kbps, 1=1Mbps, 2=2Mbps
+# HID keyboard injection payload (USB HID key codes, hex pairs).
+# Default: "Hello" — Left-Shift + h, e, l, l, o
+MOUSEJACK_HID_PAYLOAD: str = "002c 002b 00 00 00"  # space, then "Hello" keys
+# Seconds to sniff each confirmed vulnerable address before injection gate
+MOUSEJACK_SNIFF_SECS    = 10
+
+# Stage 25 — rfcat Sub-GHz Spectrum Survey
+# Survey frequencies in MHz. Covers the three major ISM OOK/FSK bands.
+SUBGHZ_SURVEY_FREQS: list[int] = [
+    310, 315, 318,               # North American keyfobs / garage doors
+    433, 434,                    # 433.92 MHz worldwide ISM (most common OOK)
+    868,                         # EU 868 MHz ISM (alarms, Z-Wave, smart meters)
+    915,                         # US 915 MHz ISM (sensors, alarms)
+]
+SUBGHZ_SURVEY_DWELL_MS   = 500   # RSSI dwell per frequency (ms)
+SUBGHZ_SURVEY_RSSI_MIN   = -90   # dBm threshold — ignore quieter readings
+
+# Stage 26 — rfcat Sub-GHz Capture & Replay
+SUBGHZ_CAP_FREQ_MHZ      = 433   # center frequency to capture (MHz)
+SUBGHZ_CAP_SECS          = 30    # capture duration
+SUBGHZ_CAP_MODULATION    = "ASK_OOK"  # "ASK_OOK" | "GFSK" | "2FSK" | "MSK"
+SUBGHZ_CAP_BAUD          = 4800  # symbol rate — 4800 common for OOK remotes
+SUBGHZ_CAP_BAUD_PROBE    = True  # attempt auto baud-rate detection
+SUBGHZ_REPLAY_REPEAT     = 3     # transmit each captured burst N times
+# De Bruijn brute-force for fixed-code remotes (e.g. PT2262/PT2264 style)
+SUBGHZ_BF_BITS           = 12    # code space bits (2^12 = 4096 codes)
+SUBGHZ_BF_PROTOCOL       = "PT2262"  # "PT2262" or "raw" OOK encoding
+SUBGHZ_BF_GAP_MS         = 10    # inter-burst gap (ms)
 
 # Output redaction — replace MACs and device names in all log/TUI output
 REDACT_OUTPUT: bool = False
@@ -76,6 +134,8 @@ REDACT_OUTPUT: bool = False
 ESB_INTERFACE: str | None = None         # rfstorm0 if available
 PHY_SUBGHZ_INTERFACE: str | None = None  # yardstickone0 if available
 UBERTOOTH_INTERFACE: str | None = None   # ubertooth0 if available
+# MouseJack dongle auto-detection uses PyUSB VID/PID — no interface string needed.
+# Set MOUSEJACK_USB_IDX above if multiple nRF Research Firmware dongles are present.
 
 HIGH_VALUE_PATTERNS = [
     r"lock",

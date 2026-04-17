@@ -10,7 +10,7 @@ import config
 
 log = get_logger("s4_jam")
 
-JAM_DURATION = 30
+JAM_DURATION = config.JAM_DURATION
 
 
 def run(

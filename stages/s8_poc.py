@@ -41,6 +41,7 @@ from core.models import Target, Finding
 from core.db import insert_finding
 from core.logger import get_logger
 from core.pcap import pcap_path, attach_monitor, detach_monitor
+from core.vulndb import match_ble_char, VulnMatch
 
 log = get_logger("s8_poc")
 
@@ -183,6 +184,22 @@ def run(
             log.info(f"[S8] No semantic actions applicable for {addr}.")
             return 0
 
+        # Enrich each action with CVE matches from the vulnerability database.
+        for action in actions:
+            char_entry = next(
+                (c for c in gatt_profile if c["value_handle"] == action["handle"]),
+                None,
+            )
+            props = char_entry.get("properties", []) if char_entry else []
+            uuid_norm = _normalize_uuid(action["uuid"])
+            cve_hits = match_ble_char(uuid_norm, props)
+            action["cve_matches"] = cve_hits
+            if cve_hits:
+                cve_names = ", ".join(m.name for m in cve_hits)
+                log.info(
+                    f"[S8] CVE match h={action['handle']} ({uuid_norm}): {cve_names}"
+                )
+
         _lbls = [a["label"] for a in actions]
         if len(_lbls) > 8:
             _lbl_str = ", ".join(_lbls[:8]) + f", … +{len(_lbls) - 8} more"
@@ -316,6 +333,19 @@ def run(
     evidence = _build_evidence(
         results, baseline, notifications, raw_pdu_results, post_pairing_results
     )
+
+    # Aggregate CVE matches from all actions into evidence for the finding.
+    all_cve_matches: list[dict] = []
+    for action in actions:
+        for vm in action.get("cve_matches", []):
+            all_cve_matches.append({
+                "cve": vm.cve,
+                "name": vm.name,
+                "severity": vm.severity,
+            })
+    if all_cve_matches:
+        evidence["cve_matches"] = all_cve_matches
+
     _record_finding(target, engagement_id, actions, results, evidence)
     _print_summary(target, actions, results, evidence)
 

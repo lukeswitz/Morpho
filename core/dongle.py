@@ -82,15 +82,16 @@ class DongleCaps:
 
 @dataclass
 class HardwareMap:
-    """References to all detected WHAD dongles.
+    """References to all detected WHAD dongles and auxiliary RF hardware.
 
     All fields are Optional. A session can run with only ESB/PHY hardware; BLE
     stages are skipped when ble_dongle is None.
     """
-    ble_dongle:       "WhadDongle | None" = None  # uart0/hci0 — BLE (stages 1-9, 11-13)
-    esb_dongle:       "WhadDongle | None" = None  # rfstorm0 — ESB + Unifying
-    phy_dongle:       "WhadDongle | None" = None  # yardstickone0 — sub-GHz PHY
-    ubertooth_dongle: "WhadDongle | None" = None  # ubertooth0 — passive BLE sniffer
+    ble_dongle:        "WhadDongle | None"    = None  # uart0/hci0 — BLE (stages 1-9, 11-13)
+    esb_dongle:        "WhadDongle | None"    = None  # rfstorm0 — ESB + Unifying
+    phy_dongle:        "WhadDongle | None"    = None  # yardstickone0 — sub-GHz PHY (S17/S25/S26)
+    ubertooth_dongle:  "WhadDongle | None"    = None  # ubertooth0 — passive BLE sniffer
+    mousejack_dongle:  "Any | None"           = None  # nRF Research Firmware — MouseJack S24
 
 
 # ---------------------------------------------------------------------------
@@ -640,6 +641,8 @@ def detect_hardware(
     esb_interface: str | None,
     phy_interface: str | None,
     ubertooth_interface: str | None = None,
+    mousejack_usb_idx: int = 0,
+    mousejack_enabled: bool = True,
 ) -> HardwareMap:
     """Open and probe each requested WHAD interface.
 
@@ -708,7 +711,23 @@ def detect_hardware(
             )
             ubertooth_dongle = None
 
-    if ble_dongle is None and esb_dongle is None and phy_dongle is None and ubertooth_dongle is None:
+    mousejack_dongle = None
+    if mousejack_enabled:
+        try:
+            from core.nrf24 import MouseJackDongle
+            mousejack_dongle = MouseJackDongle.find(idx=mousejack_usb_idx)
+            if mousejack_dongle is not None:
+                log.info("MouseJack nRF Research Firmware dongle detected — stage 24 available.")
+        except Exception as exc:
+            log.debug(f"MouseJack probe error: {exc}")
+
+    if (
+        ble_dongle is None
+        and esb_dongle is None
+        and phy_dongle is None
+        and ubertooth_dongle is None
+        and mousejack_dongle is None
+    ):
         log.error(
             "No WHAD devices found. Run 'whadup' to list connected hardware. "
             "Connect at least one WHAD device and retry."
@@ -720,4 +739,5 @@ def detect_hardware(
         esb_dongle=esb_dongle,
         phy_dongle=phy_dongle,
         ubertooth_dongle=ubertooth_dongle,
+        mousejack_dongle=mousejack_dongle,
     )
