@@ -1,7 +1,9 @@
 <div align="center">
-<img width="480" alt="Morpho" src="https://github.com/user-attachments/assets/2560fdc5-341a-4fdb-8160-73fb4ed4f6ac" />
 
-<h3>Multi-protocol wireless red team framework built on <a href="https://github.com/whad-team/whad-client">WHAD</a></h3>
+
+<img width="1792" height="592" alt="morphoImg" src="https://github.com/user-attachments/assets/f20b6789-bb63-44f4-ba0d-1ed6a0c8e47e" />
+
+<h4>Multi-protocol wireless red team framework built on <a href="https://github.com/whad-team/whad-client">WHAD</a></h3>
 
 <p>BLE · ESB · Logitech Unifying · ZigBee · LoRaWAN · Sub-GHz PHY · Bluetooth Classic · RF4CE · 802.15.4</p>
 
@@ -19,10 +21,10 @@
 - [CLI Reference](#cli-reference)
 - [Common Invocations](#common-invocations)
 - [Terminal UI](#terminal-ui)
-- [Stage Reference](#stage-reference)
+- [Stage Reference](#stages)
   - [BLE Stages](#ble-stages)
   - [ESB / Unifying Stages](#esb--unifying-stages)
-  - [802.15.4 / RF4CE Stages](#80215-4--rf4ce-stages)
+  - [802.15.4 / RF4CE Stages](#802154-and-rf4ce-stages)
   - [Sub-GHz PHY Stage](#sub-ghz-phy-stage)
   - [Bluetooth Classic Stage](#bluetooth-classic-stage)
   - [GATT Shell](#gatt-shell)
@@ -32,8 +34,27 @@
 - [Output](#output)
 - [Finding Types](#finding-types)
 - [Troubleshooting](#troubleshooting)
+- [Legal](#legal)
 
 ---
+
+## What It Does
+
+Morpho walks a known practical attack surface across short-range RF protocols; passively where possible.
+
+- Scans, fingerprints, and risk-scores every wireless device in range
+- Sniffs BLE connections and extracts key material (LTK, IRK, CSRK) from the air
+- Clones peripheral identities and impersonates them to centrals
+- Hijacks live BLE connections mid-session, hands you an interactive GATT shell
+- Injects keystrokes and mouse events into Logitech wireless devices — no pairing required
+- Plays DuckyScript payloads over the air against unencrypted ESB targets
+- Transparently proxies BLE traffic between device and host, reading everything
+- Fuzzes every writable GATT handle with malformed payloads, records what breaks
+- Opens rogue ZigBee coordinators, joins real PANs to prove association is open
+- Sweeps Sub-GHz bands and fingerprints active protocols by signature
+- Enumerates Bluetooth Classic services, flags dangerous exposed profiles
+- Saves everything: SQLite findings DB, Markdown and JSON reports, per-stage PCAPs
+- The TUI keeps it operator-friendly. **--plain makes it scriptable.** The gate system prevents irreversible actions without explicit confirmation.
 
 ## Quick Start
 
@@ -44,14 +65,26 @@ cd Morpho
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# 2. Linux — USB permissions (one-time)
+# 2. Flash ButteRFly firmware (nRF52840 MDK, one-time)
+# See https://github.com/whad-team/butterfly for flashing instructions
+
+# 3. Install WHAD
+pip install whad
+
+# Or from source for latest fixes
+git clone https://github.com/whad-team/whad-client.git
+cd whad-client
+pip install -e .
+cd ..
+
+# 4. Linux — USB permissions (one-time)
 sudo usermod -aG dialout $USER && newgrp dialout
 
-# 3. Verify connected hardware
+# 5. Verify connected hardware
 whadup
 ```
 
-**Optional data files** — place in repo root for richer device classification:
+**Optional data files** 
 
 | File | Source | Purpose |
 |------|--------|---------|
@@ -64,9 +97,13 @@ Both are optional — classification still works from name patterns and service 
 
 ## Hardware Support
 
+> [!TIP]
+>  nRF52840 MDK (ButteRFly firmware) will perform 90% of the current stages
+
+
 | Device | Interface | Protocols |
 |--------|-----------|-----------|
-| Makerdiary nRF52840 MDK (ButteRFly firmware) | `uart0` | BLE (all modes), ZigBee/802.15.4, ESB scanner |
+| Makerdiary nRF52840 MDK ([ButteRFly firmware](https://github.com/whad-team/butterfly)) | `uart0` | BLE (all modes), ZigBee/802.15.4, ESB scanner |
 | RfStorm (nRF24L01+) | `rfstorm0` | ESB sniffer (all-channel), Logitech Unifying |
 | YARD Stick One | `yardstickone0` | Sub-GHz PHY (300–928 MHz) |
 | Ubertooth One | `ubertooth0` | Passive BLE sniff (supplements S1/S2) |
@@ -206,7 +243,7 @@ _(rfstorm0 preferred; falls back to uart0)_
 | 18 | ESB PRX/PTX Active | **OPT-IN** | **PRX** — listen as Primary Receiver, arm ACK payloads, capture and entropy-check frames. **PTX** — `synchronize()` then `send_data(waiting_ack=True)` to inject unauthenticated frames. |
 | 19 | Unifying Python API | **OPT-IN** | `whad.unifying.Mouse` + `whad.unifying.Keyboard`. Sub-modes: Dongle enumeration, Injector, Mouse spiral+click, Keyboard `send_text()`, DuckyScript parser (STRING/ENTER/DELAY/modifiers). |
 
-### 802.15.4 / RF4CE Stages
+### 802.15.4 and RF4CE Stages
 
 _(uart0 / ButteRFly)_
 
@@ -451,3 +488,37 @@ sudo apt install ubertooth
 
 **All devices classified as `mobile_device`**
 `company_identifiers.yaml` may be matching too broadly on manufacturer-specific AD records (e.g. `0x004C` for iBeacon). Remove the file to fall back to OUI-based classification, which is more reliable for device class identification.
+
+
+## Legal
+
+This software is provided for authorized security research and professional penetration testing only.
+
+You are solely responsible for how you use this tool.
+
+Operating Morpho against wireless devices, networks, or infrastructure you do not own or lack explicit written authorization to test may violate one or more of the following, depending on jurisdiction:
+
+- United States: Computer Fraud and Abuse Act (18 U.S.C. § 1030), Electronic Communications Privacy Act (18 U.S.C. §§ 2510–2523), FCC Part 15 / Part 97 regulations
+- European Union: Directive on Attacks Against Information Systems (2013/40/EU), national implementations thereof
+- United Kingdom: Computer Misuse Act 1990
+- Canada: Criminal Code §§ 342.1, 184, 193
+- Australia: Criminal Code Act 1995 §§ 477–478
+
+RF transmission may additionally implicate spectrum licensing law independent of computer crime statutes.
+
+The authors, contributors, and distributors of Morpho:
+
+- Make no warranty, express or implied, regarding fitness for any purpose
+Accept no liability for damages, legal consequences, or harm arising from use or misuse
+
+- Do not endorse or authorize any use that violates applicable law or third-party rights
+
+Before using this tool:
+
+- Obtain written authorization scoped to specific devices, frequency bands, and time windows
+- Confirm RF transmission is permitted in your jurisdiction and location
+- Coordinate with facility owners, RF spectrum regulators, and legal counsel as appropriate
+
+This software is released under the MIT License. See LICENSE for terms.
+
+If you are unsure whether your intended use is lawful, do not proceed.
