@@ -3,7 +3,7 @@
 
 <img width="1792" height="592" alt="morphoImg" src="https://github.com/user-attachments/assets/f20b6789-bb63-44f4-ba0d-1ed6a0c8e47e" />
 
-<h3>Multi-protocol wireless red team framework built on <a href="https://github.com/whad-team/whad-client">WHAD</a></h3>
+<h4>Multi-protocol wireless red team framework built on <a href="https://github.com/whad-team/whad-client">WHAD</a></h3>
 
 <p>BLE · ESB · Logitech Unifying · ZigBee · LoRaWAN · Sub-GHz PHY · Bluetooth Classic · RF4CE · 802.15.4</p>
 
@@ -34,6 +34,7 @@
 - [Output](#output)
 - [Finding Types](#finding-types)
 - [Troubleshooting](#troubleshooting)
+- [Legal](#legal)
 
 ---
 
@@ -453,3 +454,37 @@ sudo apt install ubertooth
 
 **All devices classified as `mobile_device`**
 `company_identifiers.yaml` may be matching too broadly on manufacturer-specific AD records (e.g. `0x004C` for iBeacon). Remove the file to fall back to OUI-based classification, which is more reliable for device class identification.
+
+
+## Legal
+
+This software is provided for authorized security research and professional penetration testing only.
+
+You are solely responsible for how you use this tool.
+
+Operating Morpho against wireless devices, networks, or infrastructure you do not own or lack explicit written authorization to test may violate one or more of the following, depending on jurisdiction:
+
+- United States: Computer Fraud and Abuse Act (18 U.S.C. § 1030), Electronic Communications Privacy Act (18 U.S.C. §§ 2510–2523), FCC Part 15 / Part 97 regulations
+- European Union: Directive on Attacks Against Information Systems (2013/40/EU), national implementations thereof
+- United Kingdom: Computer Misuse Act 1990
+- Canada: Criminal Code §§ 342.1, 184, 193
+- Australia: Criminal Code Act 1995 §§ 477–478
+
+RF transmission may additionally implicate spectrum licensing law independent of computer crime statutes.
+
+The authors, contributors, and distributors of Morpho:
+
+- Make no warranty, express or implied, regarding fitness for any purpose
+Accept no liability for damages, legal consequences, or harm arising from use or misuse
+
+- Do not endorse or authorize any use that violates applicable law or third-party rights
+
+Before using this tool:
+
+- Obtain written authorization scoped to specific devices, frequency bands, and time windows
+- Confirm RF transmission is permitted in your jurisdiction and location
+- Coordinate with facility owners, RF spectrum regulators, and legal counsel as appropriate
+
+This software is released under the MIT License. See LICENSE for terms.
+
+If you are unsure whether your intended use is lawful, do not proceed.
