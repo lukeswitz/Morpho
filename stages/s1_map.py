@@ -11,6 +11,7 @@ from scapy.layers.bluetooth4LE import (
 )
 
 from whad.ble import Scanner
+from whad.ble.profile.advdata import AdvManufacturerSpecificData
 
 from core.dongle import WhadDongle
 from core.models import Target
@@ -219,7 +220,7 @@ def _extract_device_info(dev) -> dict:
         if svc_str:
             services.append(svc_str)
 
-    # Manufacturer data: may be bytes or a ManufacturerData object.
+    # Manufacturer data: may be bytes, a ManufacturerData object, or in ad_records.
     mfr_data_raw = _get("manufacturer_data", default=None)
     company_id: int | None = None
     manufacturer_bytes: bytes | None = None
@@ -232,6 +233,23 @@ def _extract_device_info(dev) -> dict:
             raw_bytes = getattr(mfr_data_raw, "data", None)
             if isinstance(raw_bytes, bytes):
                 manufacturer_bytes = raw_bytes
+
+    # WHAD AdvertisingDevice: manufacturer data lives in ad_records, not a direct attr.
+    if company_id is None:
+        ad_recs = getattr(dev, "ad_records", None)
+        if ad_recs is not None:
+            try:
+                for rec in ad_recs:
+                    if isinstance(rec, AdvManufacturerSpecificData):
+                        company_id = rec.company
+                        # Reconstruct full AD payload: 2-byte LE company_id + data.
+                        # decode_manufacturer() expects the raw AD record format.
+                        manufacturer_bytes = (
+                            company_id.to_bytes(2, "little") + (rec.data or b"")
+                        )
+                        break
+            except Exception:
+                pass
 
     tx_power = _get("tx_power", "tx_power_level", default=None)
     if tx_power is not None:
