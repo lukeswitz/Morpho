@@ -1,5 +1,7 @@
 <div align="center">
-<img width="480" alt="Morpho" src="https://github.com/user-attachments/assets/2560fdc5-341a-4fdb-8160-73fb4ed4f6ac" />
+
+
+<img width="1792" height="592" alt="morphoImg" src="https://github.com/user-attachments/assets/f20b6789-bb63-44f4-ba0d-1ed6a0c8e47e" />
 
 <h3>Multi-protocol wireless red team framework built on <a href="https://github.com/whad-team/whad-client">WHAD</a></h3>
 
@@ -19,10 +21,10 @@
 - [CLI Reference](#cli-reference)
 - [Common Invocations](#common-invocations)
 - [Terminal UI](#terminal-ui)
-- [Stage Reference](#stage-reference)
+- [Stage Reference](#stages)
   - [BLE Stages](#ble-stages)
   - [ESB / Unifying Stages](#esb--unifying-stages)
-  - [802.15.4 / RF4CE Stages](#80215-4--rf4ce-stages)
+  - [802.15.4 / RF4CE Stages](#802154-and-rf4ce-stages)
   - [Sub-GHz PHY Stage](#sub-ghz-phy-stage)
   - [Bluetooth Classic Stage](#bluetooth-classic-stage)
   - [GATT Shell](#gatt-shell)
@@ -206,7 +208,7 @@ _(rfstorm0 preferred; falls back to uart0)_
 | 18 | ESB PRX/PTX Active | **OPT-IN** | **PRX** — listen as Primary Receiver, arm ACK payloads, capture and entropy-check frames. **PTX** — `synchronize()` then `send_data(waiting_ack=True)` to inject unauthenticated frames. |
 | 19 | Unifying Python API | **OPT-IN** | `whad.unifying.Mouse` + `whad.unifying.Keyboard`. Sub-modes: Dongle enumeration, Injector, Mouse spiral+click, Keyboard `send_text()`, DuckyScript parser (STRING/ENTER/DELAY/modifiers). |
 
-### 802.15.4 / RF4CE Stages
+### 802.15.4 and RF4CE Stages
 
 _(uart0 / ButteRFly)_
 
