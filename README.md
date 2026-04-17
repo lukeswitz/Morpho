@@ -38,6 +38,24 @@
 
 ---
 
+## What It Does
+
+Morpho walks a known practical attack surface across short-range RF protocols; passively where possible.
+
+- Scans, fingerprints, and risk-scores every wireless device in range
+- Sniffs BLE connections and extracts key material (LTK, IRK, CSRK) from the air
+- Clones peripheral identities and impersonates them to centrals
+- Hijacks live BLE connections mid-session, hands you an interactive GATT shell
+- Injects keystrokes and mouse events into Logitech wireless devices — no pairing required
+- Plays DuckyScript payloads over the air against unencrypted ESB targets
+- Transparently proxies BLE traffic between device and host, reading everything
+- Fuzzes every writable GATT handle with malformed payloads, records what breaks
+- Opens rogue ZigBee coordinators, joins real PANs to prove association is open
+- Sweeps Sub-GHz bands and fingerprints active protocols by signature
+- Enumerates Bluetooth Classic services, flags dangerous exposed profiles
+- Saves everything: SQLite findings DB, Markdown and JSON reports, per-stage PCAPs
+- The TUI keeps it operator-friendly. **--plain makes it scriptable.** The gate system prevents irreversible actions without explicit confirmation.
+
 ## Quick Start
 
 ```bash
@@ -47,14 +65,23 @@ cd Morpho
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# 2. Linux — USB permissions (one-time)
+# 2. Install WHAD
+pip install whad
+
+# Or from source for latest fixes
+git clone https://github.com/whad-team/whad-client.git
+cd whad-client
+pip install -e .
+cd ..
+
+# 3. Linux — USB permissions (one-time)
 sudo usermod -aG dialout $USER && newgrp dialout
 
-# 3. Verify connected hardware
+# 4. Verify connected hardware
 whadup
 ```
 
-**Optional data files** — place in repo root for richer device classification:
+**Optional data files** 
 
 | File | Source | Purpose |
 |------|--------|---------|
@@ -66,6 +93,10 @@ Both are optional — classification still works from name patterns and service 
 ---
 
 ## Hardware Support
+
+> [!TIP]
+>  nRF52840 MDK (ButteRFly firmware) will perform 90% of the current stages
+
 
 | Device | Interface | Protocols |
 |--------|-----------|-----------|
