@@ -40,6 +40,8 @@
 
 ## What It Does
 
+<img width="940" height="475" alt="ss" src="https://github.com/user-attachments/assets/964c4491-ee93-424b-9246-6219be8b8428" />
+
 Morpho walks a known practical attack surface across short-range RF protocols; passively where possible.
 
 - Scans, fingerprints, and risk-scores every wireless device in range
